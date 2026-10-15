@@ -33,7 +33,9 @@ sim/results/           raw output of the benchmark runs
 firmware/core/         portable C++17 protocol core (packet codec + AEAD, router, SOS, NMEA, airtime)
 firmware/tests/        host tests, including multi-node runs over a simulated radio
 firmware/third_party/  Monocypher 4.0.2 (vendored, pinned; BSD-2 / CC0)
-firmware/pi/           ghostwaved: Raspberry Pi daemon for the Backcountry Signal HAT (RadioLib)
+firmware/pi/           ghostwaved: Raspberry Pi daemon for the Backcountry Signal HAT (RadioLib),
+                       plus a UDP virtual radio for testing without hardware
+firmware/pi/tools/     vmesh.sh: 4-daemon virtual mesh demo
 ```
 
 ## Run the simulator
@@ -51,6 +53,60 @@ SOS reach to fixed nodes: `python3 ghostsim.py --scenario backcountry --proto fl
 ```bash
 cd firmware && cmake -S . -B build && cmake --build build && ./build/ghostwave_tests
 ```
+
+## Virtual mesh (no hardware)
+
+`ghostwaved --radio udp` replaces the LoRa radio with UDP multicast. Every daemon on the group gets every
+frame. The receiver then decides from the two positions whether the frame would have arrived over the
+air. The channel model is the same as `sim/ghostsim.py`:
+
+- **Path loss:** 31.7 dB at 1 m, exponent 3.5.
+- **Fading:** 5 dB Gaussian, drawn per frame and per receiver.
+- **Sensitivity:** −129 dBm.
+- **Collisions:** two overlapping frames both fail unless one is 6 dB stronger.
+- **Half duplex:** a node cannot receive while it transmits.
+- **RSSI:** the router is given the derived RSSI.
+- **Busy channel:** the channel reads busy while a frame above sensitivity is still within its LoRa
+  airtime. This is what the router's CSMA checks.
+
+With the default 24 dBm EIRP and 2 dBi receive gain, half of all frames get through at about 3.3 km.
+Nearly all do at 1.5 km, and almost none beyond 7 km.
+
+This build needs neither lgpio nor RadioLib. It works on macOS and Linux:
+
+```bash
+cd firmware && cmake -S . -B build -DGHOSTWAVE_BUILD_VIRT=ON && cmake --build build
+./build/ghostwaved --radio udp --id a1 --key /tmp/a1.key --lat 46.8700 --lon -113.9900
+```
+
+- **Position:** each node needs a position, from `--lat/--lon` or `--nmea FILE`. The file can be a
+  regular file or a FIFO of NMEA sentences. It is followed like `tail -f`, so lines appended later
+  move the node. Frames from or to a node with no fix are dropped.
+- **Options:** `--mcast 239.77.0.1:47700` sets the group. `--vif ADDR` picks the interface; use
+  `--vif 127.0.0.1` when offline. `--vtx-dbm`, `--vgain` and `--vfade` change the link budget and
+  fading. `--vlog` prints one line per frame heard, with distance and RSSI.
+- **Stats:** `stats` adds a `vradio` line showing frames heard, decoded, out of range, weak, collided,
+  and dropped for no position.
+- **Pi builds:** a `-DGHOSTWAVE_BUILD_PI=ON` build has both backends. `--radio e22p` is the default
+  there. With `--radio udp`, a Pi can join a virtual mesh on the LAN, and multicast TTL 1 keeps it on
+  that LAN.
+
+**Demo:** `firmware/pi/tools/vmesh.sh` builds the daemon if needed. It then runs four nodes in a
+partitioned chain:
+
+```
+A (0 km) --- B (1.5 km)  . . . gap . . .  C (9 km) --- D (10.5 km)
+```
+
+1. A and D swap keys, and D refuses plaintext.
+2. A sends D a DM and raises an SOS.
+3. B picks both up and walks to 8 km. Its position comes from a fake NMEA file.
+4. B carries both across the gap.
+
+The script passes when D prints the decrypted DM and C and D both hold the SOS. A run takes about
+70 s. A gets no `DELIVERED`, because D's receipt waits on the far side until someone walks back.
+Env vars: `VMESH_VLOG=1` logs every frame, `VMESH_KEEP=1` keeps the logs, and `VMESH_IF` and
+`VMESH_PORT` choose the network.
 
 ## Run on the Pi HAT
 
