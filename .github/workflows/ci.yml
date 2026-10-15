@@ -34,3 +34,25 @@ jobs:
       - name: Trail scenario, one seed
         working-directory: sim
         run: python3 ghostsim.py --scenario trail --proto ghostwave --seeds 1
+
+  mcu-build:
+    name: MCU firmware (PlatformIO)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [heltec_wireless_tracker_v2, heltec_v3]
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4.2.3
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/mcu/platformio.ini') }}
+      - name: Install PlatformIO
+        run: pip install platformio==6.2.0
+      - name: Build ${{ matrix.env }}
+        working-directory: firmware/mcu
+        run: pio run -e ${{ matrix.env }}
