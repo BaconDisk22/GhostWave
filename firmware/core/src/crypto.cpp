@@ -1,10 +1,10 @@
-#include "ridgeline/crypto.h"
+#include "ghostwave/crypto.h"
 
 #include <cstring>
 
 #include "monocypher.h"
 
-namespace rl {
+namespace gw {
 
 void x25519Public(const uint8_t secret[kKeySize], uint8_t pub[kKeySize]) {
   crypto_x25519_public_key(pub, secret);
@@ -15,7 +15,7 @@ void ed25519ToX25519(const uint8_t edPub[kKeySize], uint8_t xPub[kKeySize]) {
 }
 
 bool dmKey(const uint8_t mySecret[kKeySize], const uint8_t theirPub[kKeySize], uint8_t out[kKeySize]) {
-  static const char kInfo[] = "ridgeline-dm-v1";
+  static const char kInfo[] = "ghostwave-dm-v1";
   constexpr size_t kInfoLen = sizeof kInfo - 1;
   uint8_t mine[kKeySize];
   x25519Public(mySecret, mine);
@@ -35,4 +35,4 @@ bool dmKey(const uint8_t mySecret[kKeySize], const uint8_t theirPub[kKeySize], u
 
 void wipe(void* p, size_t n) { crypto_wipe(p, n); }
 
-}  // namespace rl
+}  // namespace gw

@@ -1,5 +1,0 @@
-backcountry  ridgeline-slots      pdr=0.983 pdr60=0.552 lat_med=   37.9s air/msg= 27.92s util=0.596 tx=14419 lost=11354
-
-| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
-|---|---|---|---|---|---|---|
-| backcountry | ridgeline-slots | 98.3 % | 55.2 % | 37.9 s | 27.92 s | 59.6 % |

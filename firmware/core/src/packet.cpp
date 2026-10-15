@@ -1,4 +1,4 @@
-#include "ridgeline/packet.h"
+#include "ghostwave/packet.h"
 
 #include <algorithm>
 #include <cmath>
@@ -6,7 +6,7 @@
 
 #include "monocypher.h"
 
-namespace rl {
+namespace gw {
 namespace {
 
 void put16(uint8_t* p, uint16_t v) {
@@ -252,4 +252,4 @@ bool aeadOpen(const Packet& p, const uint8_t key[32], std::vector<uint8_t>& plai
   return !bad;
 }
 
-}  // namespace rl
+}  // namespace gw

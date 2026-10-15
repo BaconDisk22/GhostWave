@@ -1,4 +1,4 @@
-// Host tests for the Ridgeline core. No framework: each CHECK prints and counts.
+// Host tests for the GhostWave core. No framework: each CHECK prints and counts.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -8,12 +8,12 @@
 #include <vector>
 
 #include "monocypher.h"
-#include "ridgeline/crypto.h"
-#include "ridgeline/packet.h"
-#include "ridgeline/router.h"
-#include "ridgeline/util.h"
+#include "ghostwave/crypto.h"
+#include "ghostwave/packet.h"
+#include "ghostwave/router.h"
+#include "ghostwave/util.h"
 
-using namespace rl;
+using namespace gw;
 
 static int g_fail = 0, g_pass = 0;
 #define CHECK(cond)                                                     \
@@ -229,7 +229,7 @@ static void testPosAge() {
 static void testUtil() {
   std::printf("airtime + geo + nmea\n");
   Phy phy;
-  CHECK(airtimeMs(phy, 85) == 526);   // matches sim/ridgesim.py airtime(85)
+  CHECK(airtimeMs(phy, 85) == 526);   // matches sim/ghostsim.py airtime(85)
   CHECK(airtimeMs(phy, 64) == 423);
   Position a{46.0, -114.0, true}, b{46.0 + 0.0089932, -114.0, true};
   CHECK(std::fabs(distanceM(a, b) - 1000) < 1.0);

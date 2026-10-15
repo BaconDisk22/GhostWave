@@ -1,12 +1,12 @@
-#include "ridgeline/router.h"
+#include "ghostwave/router.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 
-#include "ridgeline/crypto.h"
+#include "ghostwave/crypto.h"
 
-namespace rl {
+namespace gw {
 namespace {
 
 constexpr uint64_t kSeenLifetimeMs = 3600 * 1000;
@@ -940,4 +940,4 @@ void Router::sosTick(uint64_t now) {
   }
 }
 
-}  // namespace rl
+}  // namespace gw

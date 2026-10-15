@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""Ridgeline mesh simulator.
+"""GhostWave mesh simulator.
 
 Compares, on identical mobility, traffic and PHY:
   flood3 / flood7  managed flooding with SNR-weighted rebroadcast + suppression
                    (models Meshtastic's default behaviour)
   pathlearn        fixed repeaters flood, destination returns a path, later
                    messages are source-routed (models MeshCore)
-  ridgeline        contention-based geographic forwarding + DTN custody +
+  ghostwave        contention-based geographic forwarding + DTN custody +
                    spray-and-wait + GPS slots + airtime budget (docs/DESIGN.md)
                    + SOS lane (scoped flood + 24 h epidemic store, §8)
-  ridgeline-*      ablations with one pillar switched off
+  ghostwave-*      ablations with one pillar switched off
 
 --sos adds SOS events (random mobile originators, re-sent every 5 min) on top of
 the normal traffic and reports how long until any fixed node holds each one.
 flood* sends them as a plain hop-limited flood (Meshtastic has no SOS lane).
 
 Baselines are simplified models, not the real firmware. Treat results as
-relative, not absolute. Pure stdlib; run `python3 ridgesim.py --help`.
+relative, not absolute. Pure stdlib; run `python3 ghostsim.py --help`.
 """
 import argparse
 import heapq
@@ -45,7 +45,7 @@ def airtime(nbytes):
     return (PREAMBLE + 4.25) * TSYM + n * TSYM
 
 
-# slot timing (Ridgeline)
+# slot timing (GhostWave)
 GUARD = 0.040
 SLOT = GUARD + airtime(128)
 PRIO_EVERY = 8
@@ -597,8 +597,8 @@ class PathLearn(Proto):
             n.wait.pop(f.mid, None)
 
 
-# ------------------------------------------------------------ Ridgeline ----
-class Ridgeline(Proto):
+# ------------------------------------------------------------ GhostWave ----
+class GhostWave(Proto):
     R_EST, THR, K, HOPS, COPIES = 6000.0, 150.0, 3, 15, 8
     D_AREA = 2500.0     # forwarding-area diameter: candidates inside hear each other
     AREA_MIN_NB = 10    # only restrict to the area when the sender is in a dense spot
@@ -608,7 +608,7 @@ class Ridgeline(Proto):
     SOS_TTL, SOS_REOFFER, SOS_DUP_CANCEL, BEACON_REPLY_MIN = 24 * 3600, 900, 2, 10
     SOS_RELAY_GAP = 900     # a relay re-floods a superseding seq at most this often
 
-    def __init__(self, slots=False, dtn=True, budget=True, area=True, name="ridgeline"):
+    def __init__(self, slots=False, dtn=True, budget=True, area=True, name="ghostwave"):
         self.slotted, self.dtn, self.use_budget, self.name = slots, dtn, budget, name
         self.area = area
 
@@ -1114,11 +1114,11 @@ PROTOS = {
     "flood3": lambda: Flood(3),
     "flood7": lambda: Flood(7),
     "pathlearn": PathLearn,
-    "ridgeline": lambda: Ridgeline(),
-    "ridgeline-slots": lambda: Ridgeline(slots=True, name="ridgeline-slots"),
-    "ridgeline-nobudget": lambda: Ridgeline(budget=False, name="ridgeline-nobudget"),
-    "ridgeline-nodtn": lambda: Ridgeline(dtn=False, name="ridgeline-nodtn"),
-    "ridgeline-noarea": lambda: Ridgeline(area=False, name="ridgeline-noarea"),
+    "ghostwave": lambda: GhostWave(),
+    "ghostwave-slots": lambda: GhostWave(slots=True, name="ghostwave-slots"),
+    "ghostwave-nobudget": lambda: GhostWave(budget=False, name="ghostwave-nobudget"),
+    "ghostwave-nodtn": lambda: GhostWave(dtn=False, name="ghostwave-nodtn"),
+    "ghostwave-noarea": lambda: GhostWave(area=False, name="ghostwave-noarea"),
 }
 
 

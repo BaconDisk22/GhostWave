@@ -1,10 +1,10 @@
-// ridgelined: Ridgeline node daemon for a Raspberry Pi with the Backcountry
+// ghostwaved: GhostWave node daemon for a Raspberry Pi with the Backcountry
 // Signal HAT (E22P-915M30S / SX1262 + MAX-M10S GPS).
 //
 // Default pins (BCM) match the HAT and Meshtastic's lora-pimesh-1w-v2 preset:
 //   CS 8 (CE0)  DIO1 6  BUSY 5  RESET 18  module EN 26 (held high in config.txt)
 //
-// Usage: sudo ./ridgelined [--id HEX] [--freq MHz] [--power dBm] [--gps /dev/serial0]
+// Usage: sudo ./ghostwaved [--id HEX] [--freq MHz] [--power dBm] [--gps /dev/serial0]
 //                          [--lat L --lon L]  (fixed position, no GPS)
 //                          [--key FILE] [--psk FILE] [--peers FILE]
 //                          [--require-enc] [--responder]
@@ -14,7 +14,7 @@
 //
 // Key files (DESIGN §9.1):
 //   --key    X25519 identity secret, 64 hex chars (or 32 raw bytes). Created with
-//            mode 600 if missing. Default /var/lib/ridgeline/identity.key.
+//            mode 600 if missing. Default /var/lib/ghostwave/identity.key.
 //   --psk    optional channel key, same format. Generate: openssl rand -hex 32
 //   --peers  optional "<hex-id> <hex-pubkey>" lines ('#' comments), as printed
 //            by the `keys` command on the other node.
@@ -38,8 +38,8 @@
 #include <string>
 
 #include "hal/RPi/PiHal.h"
-#include "ridgeline/crypto.h"
-#include "ridgeline/router.h"
+#include "ghostwave/crypto.h"
+#include "ghostwave/router.h"
 
 namespace {
 
@@ -52,12 +52,12 @@ struct Options {
   double lat = 0, lon = 0;
   bool fixedPos = false;
   int pinCs = 8, pinIrq = 6, pinRst = 18, pinBusy = 5;
-  std::string keyFile = "/var/lib/ridgeline/identity.key";
+  std::string keyFile = "/var/lib/ghostwave/identity.key";
   std::string pskFile, peersFile;
   bool requireEnc = false, responder = false;
 };
 
-using Key32 = std::array<uint8_t, rl::kKeySize>;
+using Key32 = std::array<uint8_t, gw::kKeySize>;
 
 uint64_t nowMs() {
   using namespace std::chrono;
@@ -69,7 +69,7 @@ uint32_t machineId() {
   std::string s;
   std::getline(f, s);
   if (s.empty()) return 0x12345678;
-  return rl::crc32c(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+  return gw::crc32c(reinterpret_cast<const uint8_t*>(s.data()), s.size());
 }
 
 int openGps(const std::string& dev) {
@@ -127,17 +127,17 @@ bool readKeyFile(const std::string& path, Key32& key) {
   ssize_t n = read(fd, buf, sizeof buf);
   close(fd);
   bool ok = false;
-  if (n == static_cast<ssize_t>(rl::kKeySize)) {
-    std::memcpy(key.data(), buf, rl::kKeySize);
+  if (n == static_cast<ssize_t>(gw::kKeySize)) {
+    std::memcpy(key.data(), buf, gw::kKeySize);
     ok = true;
   } else if (n > 0) {
     std::string hex;
     for (ssize_t i = 0; i < n; ++i)
       if (!std::isspace(static_cast<unsigned char>(buf[i]))) hex += buf[i];
     ok = fromHex(hex, key.data(), key.size());
-    rl::wipe(&hex[0], hex.size());
+    gw::wipe(&hex[0], hex.size());
   }
-  rl::wipe(buf, sizeof buf);
+  gw::wipe(buf, sizeof buf);
   return ok;
 }
 
@@ -180,7 +180,7 @@ bool loadIdentity(const std::string& path, Key32& secret) {
   bool ok = write(fd, hex.data(), hex.size()) == static_cast<ssize_t>(hex.size());
   ok = (fsync(fd) == 0) && ok;
   close(fd);
-  rl::wipe(&hex[0], hex.size());
+  gw::wipe(&hex[0], hex.size());
   if (!ok) {
     std::fprintf(stderr, "cannot write %s\n", path.c_str());
     unlink(path.c_str());
@@ -190,16 +190,16 @@ bool loadIdentity(const std::string& path, Key32& secret) {
   return true;
 }
 
-bool addPeer(rl::Router& r, const std::string& idHex, const std::string& pubHex) {
+bool addPeer(gw::Router& r, const std::string& idHex, const std::string& pubHex) {
   uint32_t id;
-  uint8_t pub[rl::kKeySize];
+  uint8_t pub[gw::kKeySize];
   if (!parseId(idHex, id) || !fromHex(pubHex, pub, sizeof pub)) return false;
   return r.addPeerKey(id, pub);
 }
 
 // One "<hex-id> <hex-pubkey>" per line; blank lines and '#' comments skipped.
 // Returns the number of keys added, or -1 if the file cannot be opened.
-int loadPeers(const std::string& path, rl::Router& r) {
+int loadPeers(const std::string& path, gw::Router& r) {
   std::ifstream f(path);
   if (!f) return -1;
   std::string line;
@@ -222,7 +222,7 @@ PiHal* g_hal = nullptr;
 SX1262* g_radio = nullptr;
 int g_irqPin = 6;
 
-class PiRadio : public rl::RadioPort {
+class PiRadio : public gw::RadioPort {
  public:
   bool channelBusy() override {
     if (g_hal->digitalRead(g_irqPin)) return true;      // a packet is waiting
@@ -238,7 +238,7 @@ class PiRadio : public rl::RadioPort {
   }
 };
 
-class StdoutApp : public rl::AppPort {
+class StdoutApp : public gw::AppPort {
  public:
   void onMessage(uint32_t src, uint32_t msgId, const std::vector<uint8_t>& p) override {
     std::printf("MSG from %08x id %08x: %.*s\n", src, msgId, static_cast<int>(p.size()),
@@ -249,7 +249,7 @@ class StdoutApp : public rl::AppPort {
     std::printf("DELIVERED to %08x id %08x\n", dst, msgId);
     std::fflush(stdout);
   }
-  void onSos(const rl::SosInfo& s) override {
+  void onSos(const gw::SosInfo& s) override {
     std::printf("SOS from %08x seq %u", s.src, s.seq);
     if (s.pos.valid) std::printf(" at %.6f %.6f", s.pos.lat, s.pos.lon);
     else std::printf(" no fix");
@@ -265,7 +265,7 @@ class StdoutApp : public rl::AppPort {
   }
 };
 
-void handleCommand(const std::string& line, rl::Router& r, const rl::Position& pos,
+void handleCommand(const std::string& line, gw::Router& r, const gw::Position& pos,
                    const Key32& pub) {
   std::istringstream in(line);
   std::string cmd;
@@ -305,7 +305,7 @@ void handleCommand(const std::string& line, rl::Router& r, const rl::Position& p
     std::getline(in, text);
     if (!text.empty() && text[0] == ' ') text.erase(0, 1);
     if (r.startSos(text, 0xFF, 0xFF, nowMs()))
-      std::printf("SOS on%s, repeating until sosstop\n", text.size() > rl::kSosTextMax ? " (text cut to 60 bytes)" : "");
+      std::printf("SOS on%s, repeating until sosstop\n", text.size() > gw::kSosTextMax ? " (text cut to 60 bytes)" : "");
     else
       std::printf("SOS rate limited, try again in a minute\n");
   } else if (cmd == "sosstop") {
@@ -352,7 +352,7 @@ int main(int argc, char** argv) {
   // Router does not touch the radio until onReceive / tick.
   Key32 secret{}, pub{}, psk{};
   if (!loadIdentity(o.keyFile, secret)) return 1;
-  rl::x25519Public(secret.data(), pub.data());
+  gw::x25519Public(secret.data(), pub.data());
   bool havePsk = false;
   if (!o.pskFile.empty()) {
     if (!readKeyFile(o.pskFile, psk)) {
@@ -362,17 +362,17 @@ int main(int argc, char** argv) {
     havePsk = true;
   }
 
-  rl::Config cfg;
+  gw::Config cfg;
   cfg.nodeId = o.id;
   cfg.requireEncryption = o.requireEnc;
   cfg.responder = o.responder;
   PiRadio radio;
   StdoutApp app;
-  rl::Router router(cfg, radio, app);
+  gw::Router router(cfg, radio, app);
   router.setIdentityKey(secret.data());
-  rl::wipe(secret.data(), secret.size());
+  gw::wipe(secret.data(), secret.size());
   if (havePsk) router.setChannelKey(psk.data());
-  rl::wipe(psk.data(), psk.size());
+  gw::wipe(psk.data(), psk.size());
   int peers = 0;
   if (!o.peersFile.empty()) {
     peers = loadPeers(o.peersFile, router);
@@ -395,7 +395,7 @@ int main(int argc, char** argv) {
   g_radio->setCRC(2);
   g_radio->startReceive();
 
-  rl::Position pos;
+  gw::Position pos;
   if (o.fixedPos) {
     pos = {o.lat, o.lon, true};
     router.setPosition(pos, nowMs());
@@ -403,7 +403,7 @@ int main(int argc, char** argv) {
   int gps = o.fixedPos ? -1 : openGps(o.gpsDev);
   if (!o.fixedPos && gps < 0) std::fprintf(stderr, "warning: cannot open %s, no position\n", o.gpsDev.c_str());
 
-  std::printf("ridgelined node %08x on %.3f MHz, %d dBm drive\n", o.id, o.freqMHz, o.powerDbm);
+  std::printf("ghostwaved node %08x on %.3f MHz, %d dBm drive\n", o.id, o.freqMHz, o.powerDbm);
   std::printf("key %s, channel key %s, %d peer key%s%s%s\n", toHex(pub.data(), pub.size()).c_str(),
               havePsk ? "on" : "off", peers, peers == 1 ? "" : "s",
               o.requireEnc ? ", plaintext DATA refused" : "", o.responder ? ", SOS responder" : "");
@@ -424,8 +424,8 @@ int main(int argc, char** argv) {
       ssize_t n = read(gps, c, sizeof c);
       for (ssize_t i = 0; i < n; ++i) {
         if (c[i] == '\n') {
-          rl::Position p;
-          if (rl::parseNmea(gpsLine, p)) {
+          gw::Position p;
+          if (gw::parseNmea(gpsLine, p)) {
             pos = p;
             router.setPosition(pos, now);
           }

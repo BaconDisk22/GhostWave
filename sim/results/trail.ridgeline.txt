@@ -1,1 +1,0 @@
-trail        ridgeline            pdr=1.000 pdr60=0.998 lat_med=    1.0s air/msg=  5.74s util=0.153 tx=4186 lost=8943

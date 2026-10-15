@@ -1,5 +1,0 @@
-busy         ridgeline-slots      pdr=1.000 pdr60=0.373 lat_med=   84.1s air/msg= 16.31s util=2.164 tx=58175 lost=5008258
-
-| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
-|---|---|---|---|---|---|---|
-| busy | ridgeline-slots | 100.0 % | 37.3 % | 84.1 s | 16.31 s | 216.4 % |
