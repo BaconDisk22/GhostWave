@@ -1,0 +1,5 @@
+trail        pathlearn            pdr=1.000 pdr60=1.000 lat_med=    0.8s air/msg=  5.43s util=0.145 tx=4892 lost=40162
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| trail | pathlearn | 100.0 % | 100.0 % | 0.8 s | 5.43 s | 14.5 % |

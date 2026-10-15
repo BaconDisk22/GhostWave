@@ -1,0 +1,5 @@
+busy         pathlearn            pdr=0.957 pdr60=0.505 lat_med=   54.4s air/msg= 10.12s util=1.283 tx=42224 lost=1739839
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| busy | pathlearn | 95.7 % | 50.5 % | 54.4 s | 10.12 s | 128.3 % |

@@ -1,0 +1,5 @@
+trail        flood3               pdr=0.999 pdr60=0.999 lat_med=    1.0s air/msg= 21.89s util=0.582 tx=18084 lost=238872
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| trail | flood3 | 99.9 % | 99.9 % | 1.0 s | 21.89 s | 58.2 % |

@@ -1,0 +1,5 @@
+trail        ridgeline-nobudget   pdr=1.000 pdr60=0.998 lat_med=    1.1s air/msg=  5.73s util=0.153 tx=4165 lost=8362
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| trail | ridgeline-nobudget | 100.0 % | 99.8 % | 1.1 s | 5.73 s | 15.3 % |

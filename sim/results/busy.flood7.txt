@@ -1,0 +1,5 @@
+busy         flood7               pdr=0.898 pdr60=0.051 lat_med=  924.9s air/msg= 23.16s util=2.754 tx=83085 lost=5791052
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| busy | flood7 | 89.8 % | 5.1 % | 924.9 s | 23.16 s | 275.4 % |

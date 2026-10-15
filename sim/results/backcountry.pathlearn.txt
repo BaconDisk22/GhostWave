@@ -1,0 +1,5 @@
+backcountry  pathlearn            pdr=0.210 pdr60=0.210 lat_med=    0.9s air/msg=  7.76s util=0.035 tx=1028 lost=14
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| backcountry | pathlearn | 21.0 % | 21.0 % | 0.9 s | 7.76 s | 3.5 % |

@@ -1,0 +1,5 @@
+busy         flood3               pdr=0.909 pdr60=0.114 lat_med=  419.2s air/msg= 21.97s util=2.645 tx=80302 lost=5705804
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| busy | flood3 | 90.9 % | 11.4 % | 419.2 s | 21.97 s | 264.5 % |

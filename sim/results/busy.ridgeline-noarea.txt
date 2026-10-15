@@ -1,0 +1,5 @@
+busy         ridgeline-noarea     pdr=1.000 pdr60=0.852 lat_med=   13.8s air/msg=  8.92s util=1.191 tx=35561 lost=2123613
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| busy | ridgeline-noarea | 100.0 % | 85.2 % | 13.8 s | 8.92 s | 119.1 % |
