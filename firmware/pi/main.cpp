@@ -1,13 +1,14 @@
 // ghostwaved: GhostWave node daemon for a Raspberry Pi with the Backcountry
-// Signal HAT (E22P-915M30S / SX1262 + MAX-M10S GPS).
-//
-// Default pins (BCM) match the HAT and Meshtastic's lora-pimesh-1w-v2 preset:
-//   CS 8 (CE0)  DIO1 6  BUSY 5  RESET 18  module EN 26 (held high in config.txt)
+// Signal HAT (E22P-915M30S / SX1262 + MAX-M10S GPS), or for any Linux/macOS
+// host with the UDP virtual radio (pi/radio_udp.cpp).
 //
 // Usage: sudo ./ghostwaved [--id HEX] [--name NAME] [--freq MHz] [--power dBm]
 //                          [--gps /dev/serial0] [--lat L --lon L]  (fixed position, no GPS)
+//                          [--nmea FILE]      (NMEA from a file or FIFO, followed like tail -f)
 //                          [--key FILE] [--psk FILE] [--peers FILE] [--legacy-x25519]
 //                          [--require-enc] [--responder]
+//        ./ghostwaved --radio udp [--mcast 239.77.0.1:47700] [--vif ADDR] [--vtx-dbm 24]
+//                     [--vgain 2] [--vfade 5] [--vlog] ...   (virtual radio, no hardware)
 // stdin commands:  send <hex-id> <text> | known <hex-id> <lat> <lon> | stats | pos
 //                  keys | peer [<hex-id>] <hex-pubkey> | ident <hex-id>
 //                  sos <text> | sosstop | sosack <hex-id>
@@ -27,7 +28,6 @@
 //   --peers  optional "<hex-id> <hex-pubkey>" lines ('#' comments), as printed
 //            by the `keys` command on the other node. A bare key is Ed25519 and
 //            must hash to the ID; prefix "x25519:" for a legacy node's key.
-#include <RadioLib.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/stat.h>
@@ -46,22 +46,33 @@
 #include <sstream>
 #include <string>
 
-#include "hal/RPi/PiHal.h"
+#include "host_radio.h"
 #include "ghostwave/crypto.h"
 #include "ghostwave/router.h"
 
+uint64_t nowMs() {
+  using namespace std::chrono;
+  return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
 namespace {
+
+#ifdef GHOSTWAVE_HAVE_E22P
+constexpr const char* kDefaultRadio = "e22p";
+#else
+constexpr const char* kDefaultRadio = "udp";
+#endif
 
 struct Options {
   uint32_t id = 0;
   std::string name;
-  float freqMHz = 914.875f;     // clear of Meshtastic/MeshCore US defaults
-  int8_t powerDbm = 10;         // SX1262 drive; the E22P PA adds ~8–10 dB. Check your rules.
-  uint8_t syncWord = 0x24;      // private: keeps other meshes' frames out at the PHY
+  std::string radio = kDefaultRadio;
+  E22pOptions e22p;
+  UdpOptions udp;
   std::string gpsDev = "/dev/serial0";
+  std::string nmeaFile;
   double lat = 0, lon = 0;
   bool fixedPos = false;
-  int pinCs = 8, pinIrq = 6, pinRst = 18, pinBusy = 5;
   std::string keyFile = "/var/lib/ghostwave/identity.key";
   std::string pskFile, peersFile;
   bool requireEnc = false, responder = false, legacyX25519 = false;
@@ -69,17 +80,18 @@ struct Options {
 
 using Key32 = std::array<uint8_t, gw::kKeySize>;
 
-uint64_t nowMs() {
-  using namespace std::chrono;
-  return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-}
-
 uint32_t machineId() {
   std::ifstream f("/etc/machine-id");
   std::string s;
   std::getline(f, s);
   if (s.empty()) return 0x12345678;
   return gw::crc32c(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+}
+
+// A file or FIFO of NMEA sentences instead of the GPS UART. Reads at EOF
+// return 0, so lines appended later are still picked up.
+int openNmeaFile(const std::string& path) {
+  return open(path.c_str(), O_RDONLY | O_NONBLOCK);
 }
 
 int openGps(const std::string& dev) {
@@ -309,26 +321,6 @@ int loadPeers(const std::string& path, gw::Router& r) {
   return n;
 }
 
-PiHal* g_hal = nullptr;
-SX1262* g_radio = nullptr;
-int g_irqPin = 6;
-
-class PiRadio : public gw::RadioPort {
- public:
-  bool channelBusy() override {
-    if (g_hal->digitalRead(g_irqPin)) return true;      // a packet is waiting
-    int16_t r = g_radio->scanChannel();                  // CAD
-    g_radio->startReceive();
-    return r == RADIOLIB_LORA_DETECTED;
-  }
-  bool transmit(const uint8_t* buf, size_t len) override {
-    int16_t st = g_radio->transmit(const_cast<uint8_t*>(buf), len);
-    g_radio->startReceive();
-    if (st != RADIOLIB_ERR_NONE) std::fprintf(stderr, "tx failed: %d\n", st);
-    return st == RADIOLIB_ERR_NONE;
-  }
-};
-
 class StdoutApp : public gw::AppPort {
  public:
   void onMessage(uint32_t src, uint32_t msgId, const std::vector<uint8_t>& p) override {
@@ -381,8 +373,8 @@ struct PubKey {
   bool legacy = false;
 };
 
-void handleCommand(const std::string& line, gw::Router& r, const gw::Position& pos,
-                   const PubKey& pub) {
+void handleCommand(const std::string& line, gw::Router& r, HostRadio& radio,
+                   const gw::Position& pos, const PubKey& pub) {
   std::istringstream in(line);
   std::string cmd;
   in >> cmd;
@@ -408,6 +400,7 @@ void handleCommand(const std::string& line, gw::Router& r, const gw::Position& p
                 static_cast<unsigned long long>(s.airMs), r.storeSize(), r.neighborCount(nowMs()),
                 r.sosCount(), s.sosTx, s.sosHeard, s.identTx, s.identRx, s.identBad, s.keyChanges,
                 r.sosActive() ? " SOS-ACTIVE" : "");
+    radio.printStats();
   } else if (cmd == "pos") {
     std::printf("%s %.6f %.6f\n", pos.valid ? "fix" : "nofix", pos.lat, pos.lon);
   } else if (cmd == "keys") {
@@ -465,9 +458,25 @@ int main(int argc, char** argv) {
       if (!parseId(next(), o.id)) { std::fprintf(stderr, "bad --id (want up to 8 hex digits)\n"); return 2; }
     }
     else if (a == "--name") o.name = next();
-    else if (a == "--freq") o.freqMHz = std::atof(next());
-    else if (a == "--power") o.powerDbm = static_cast<int8_t>(std::atoi(next()));
+    else if (a == "--radio") o.radio = next();
+    else if (a == "--freq") o.e22p.freqMHz = std::atof(next());
+    else if (a == "--power") o.e22p.powerDbm = static_cast<int8_t>(std::atoi(next()));
     else if (a == "--gps") o.gpsDev = next();
+    else if (a == "--nmea") o.nmeaFile = next();
+    else if (a == "--mcast") {
+      std::string g = next();
+      size_t colon = g.rfind(':');
+      if (colon != std::string::npos) {
+        o.udp.port = std::atoi(g.c_str() + colon + 1);
+        g.erase(colon);
+      }
+      o.udp.group = g;
+    }
+    else if (a == "--vif") o.udp.iface = next();
+    else if (a == "--vtx-dbm") o.udp.txDbm = static_cast<float>(std::atof(next()));
+    else if (a == "--vgain") o.udp.rxGainDb = static_cast<float>(std::atof(next()));
+    else if (a == "--vfade") o.udp.fadeSigmaDb = std::atof(next());
+    else if (a == "--vlog") o.udp.log = true;
     else if (a == "--lat") { o.lat = std::atof(next()); o.fixedPos = true; }
     else if (a == "--lon") { o.lon = std::atof(next()); o.fixedPos = true; }
     else if (a == "--key") o.keyFile = next();
@@ -478,13 +487,26 @@ int main(int argc, char** argv) {
     else if (a == "--legacy-x25519") o.legacyX25519 = true;
     else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
   }
-  g_irqPin = o.pinIrq;
   if (o.name.size() > gw::kIdentNameMax) {
     std::fprintf(stderr, "--name is %zu bytes; at most %zu fit in an IDENT\n", o.name.size(), gw::kIdentNameMax);
     return 2;
   }
   if (o.legacyX25519 && !o.name.empty()) {
     std::fprintf(stderr, "--name needs an Ed25519 identity; a --legacy-x25519 node sends no IDENT\n");
+    return 2;
+  }
+#ifdef GHOSTWAVE_HAVE_E22P
+  bool radioOk = o.radio == "e22p" || o.radio == "udp";
+#else
+  bool radioOk = o.radio == "udp";
+#endif
+  if (!radioOk) {
+    std::fprintf(stderr, "unknown or unbuilt radio '%s' (this build: %s)\n", o.radio.c_str(),
+#ifdef GHOSTWAVE_HAVE_E22P
+                 "e22p, udp");
+#else
+                 "udp; build with -DGHOSTWAVE_BUILD_PI=ON for e22p");
+#endif
     return 2;
   }
 
@@ -524,13 +546,24 @@ int main(int argc, char** argv) {
   cfg.nodeId = o.id;
   cfg.requireEncryption = o.requireEnc;
   cfg.responder = o.responder;
-  PiRadio radio;
+  std::unique_ptr<HostRadio> radio;
+#ifdef GHOSTWAVE_HAVE_E22P
+  if (o.radio == "e22p") radio = makeE22pRadio(o.e22p, cfg.phy);
+#endif
+  if (o.radio == "udp") radio = makeUdpRadio(o.udp, cfg.phy, o.id);
+  if (!radio) {
+    gw::wipe(secret.data(), secret.size());
+    gw::wipe(psk.data(), psk.size());
+    return 1;
+  }
   StdoutApp app;
-  gw::Router router(cfg, radio, app);
+  gw::Router router(cfg, *radio, app);
   if (pub.legacy) {
     router.setIdentityKey(secret.data());
   } else if (!router.setSigningKey(secret.data(), o.name)) {
     std::fprintf(stderr, "setSigningKey failed\n");   // ID and name were checked above
+    gw::wipe(secret.data(), secret.size());
+    gw::wipe(psk.data(), psk.size());
     return 1;
   }
   gw::wipe(secret.data(), secret.size());
@@ -545,28 +578,22 @@ int main(int argc, char** argv) {
     }
   }
 
-  g_hal = new PiHal(0);   // SPI0, CE0 = BCM8
-  g_radio = new SX1262(new Module(g_hal, o.pinCs, o.pinIrq, o.pinRst, o.pinBusy));
-  // "Trail" preset: SF9 / BW125 / CR4/5 / 16-symbol preamble. E22 uses a 1.8 V TCXO.
-  int16_t st = g_radio->begin(o.freqMHz, 125.0, cfg.phy.sf, 5, o.syncWord, o.powerDbm,
-                              cfg.phy.preamble, 1.8, false);
-  if (st != RADIOLIB_ERR_NONE) {
-    std::fprintf(stderr, "radio init failed: %d (check SPI enabled, EN pin high, wiring)\n", st);
-    return 1;
-  }
-  g_radio->setDio2AsRfSwitch(true);
-  g_radio->setCRC(2);
-  g_radio->startReceive();
-
   gw::Position pos;
   if (o.fixedPos) {
     pos = {o.lat, o.lon, true};
     router.setPosition(pos, nowMs());
+    radio->setPosition(pos);
   }
-  int gps = o.fixedPos ? -1 : openGps(o.gpsDev);
-  if (!o.fixedPos && gps < 0) std::fprintf(stderr, "warning: cannot open %s, no position\n", o.gpsDev.c_str());
+  const std::string& gpsSrc = o.nmeaFile.empty() ? o.gpsDev : o.nmeaFile;
+  int gps = o.fixedPos ? -1 : o.nmeaFile.empty() ? openGps(o.gpsDev) : openNmeaFile(o.nmeaFile);
+  if (!o.fixedPos && gps < 0) std::fprintf(stderr, "warning: cannot open %s, no position\n", gpsSrc.c_str());
 
-  std::printf("ghostwaved node %08x on %.3f MHz, %d dBm drive\n", o.id, o.freqMHz, o.powerDbm);
+  if (o.radio == "udp")
+    std::printf("ghostwaved node %08x on virtual radio %s:%d, %.0f dBm EIRP\n", o.id,
+                o.udp.group.c_str(), o.udp.port, o.udp.txDbm);
+  else
+    std::printf("ghostwaved node %08x on %.3f MHz, %d dBm drive\n", o.id, o.e22p.freqMHz,
+                o.e22p.powerDbm);
   if (pub.legacy)
     std::printf("key x25519:%s (legacy, no IDENT)", toHex(pub.key.data(), pub.key.size()).c_str());
   else
@@ -579,12 +606,8 @@ int main(int argc, char** argv) {
   uint8_t buf[256];
   for (;;) {
     uint64_t now = nowMs();
-    if (g_hal->digitalRead(o.pinIrq)) {
-      size_t len = g_radio->getPacketLength();
-      if (len > 0 && len <= sizeof buf && g_radio->readData(buf, len) == RADIOLIB_ERR_NONE)
-        router.onReceive(buf, len, g_radio->getRSSI(), now);
-      g_radio->startReceive();
-    }
+    float rssi = 0;
+    if (size_t len = radio->receive(buf, sizeof buf, rssi)) router.onReceive(buf, len, rssi, now);
     if (gps >= 0) {
       char c[128];
       ssize_t n = read(gps, c, sizeof c);
@@ -594,6 +617,7 @@ int main(int argc, char** argv) {
           if (gw::parseNmea(gpsLine, p)) {
             pos = p;
             router.setPosition(pos, now);
+            radio->setPosition(pos);
           }
           gpsLine.clear();
         } else if (gpsLine.size() < 120) {
@@ -607,7 +631,7 @@ int main(int argc, char** argv) {
       ssize_t n = read(STDIN_FILENO, c, sizeof c);
       for (ssize_t i = 0; i < n; ++i) {
         if (c[i] == '\n') {
-          handleCommand(cmdLine, router, pos, pub);
+          handleCommand(cmdLine, router, *radio, pos, pub);
           cmdLine.clear();
         } else {
           cmdLine += c[i];

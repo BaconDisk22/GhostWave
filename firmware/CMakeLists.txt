@@ -9,6 +9,7 @@ endif()
 
 option(GHOSTWAVE_BUILD_TESTS "Build host unit tests" ON)
 option(GHOSTWAVE_BUILD_PI "Build the Raspberry Pi daemon (needs lgpio)" OFF)
+option(GHOSTWAVE_BUILD_VIRT "Build ghostwaved with only the UDP virtual radio (no lgpio/RadioLib)" OFF)
 
 # Monocypher 4.0.2, vendored and pinned (third_party/monocypher/README.md)
 add_library(monocypher STATIC
@@ -28,10 +29,20 @@ target_compile_options(ghostwave_core PRIVATE -Wall -Wextra)
 
 if(GHOSTWAVE_BUILD_TESTS)
   enable_testing()
-  add_executable(ghostwave_tests tests/test_main.cpp)
+  add_executable(ghostwave_tests tests/test_main.cpp pi/vchannel.cpp)
+  target_include_directories(ghostwave_tests PRIVATE pi)
   target_link_libraries(ghostwave_tests ghostwave_core monocypher)
   target_compile_options(ghostwave_tests PRIVATE -Wall -Wextra)
   add_test(NAME ghostwave_tests COMMAND ghostwave_tests)
+endif()
+
+# ghostwaved always has the UDP virtual radio; GHOSTWAVE_BUILD_PI adds the E22P HAT.
+if(GHOSTWAVE_BUILD_PI OR GHOSTWAVE_BUILD_VIRT)
+  add_executable(ghostwaved pi/main.cpp pi/radio_udp.cpp pi/vchannel.cpp)
+  target_link_libraries(ghostwaved ghostwave_core)
+  # warnings on our sources only; RadioLib's headers are noisy
+  set_source_files_properties(pi/main.cpp pi/radio_udp.cpp pi/vchannel.cpp
+    TARGET_DIRECTORY ghostwaved PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra")
 endif()
 
 if(GHOSTWAVE_BUILD_PI)
@@ -41,6 +52,7 @@ if(GHOSTWAVE_BUILD_PI)
     GIT_TAG 7.8.1)
   FetchContent_MakeAvailable(RadioLib)
   find_library(LGPIO lgpio REQUIRED)
-  add_executable(ghostwaved pi/main.cpp)
-  target_link_libraries(ghostwaved ghostwave_core RadioLib ${LGPIO} pthread)
+  target_sources(ghostwaved PRIVATE pi/radio_e22p.cpp)
+  target_compile_definitions(ghostwaved PRIVATE GHOSTWAVE_HAVE_E22P)
+  target_link_libraries(ghostwaved RadioLib ${LGPIO} pthread)
 endif()
