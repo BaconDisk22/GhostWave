@@ -11,7 +11,9 @@ option(GHOSTWAVE_BUILD_TESTS "Build host unit tests" ON)
 option(GHOSTWAVE_BUILD_PI "Build the Raspberry Pi daemon (needs lgpio)" OFF)
 
 # Monocypher 4.0.2, vendored and pinned (third_party/monocypher/README.md)
-add_library(monocypher STATIC third_party/monocypher/monocypher.c)
+add_library(monocypher STATIC
+  third_party/monocypher/monocypher.c
+  third_party/monocypher/monocypher-ed25519.c)
 target_include_directories(monocypher PUBLIC third_party/monocypher)
 set_target_properties(monocypher PROPERTIES C_STANDARD 99)
 
