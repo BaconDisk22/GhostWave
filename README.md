@@ -73,17 +73,30 @@ Pins are taken from the HAT: CS BCM8 (CE0), DIO1 BCM6, BUSY BCM5, RESET BCM18, m
    - `known <hex-id> <lat> <lon>` tells the node where a contact is.
    - `stats` and `pos` show counters and the current fix.
    - `keys` prints this node's id and public key, as a line for another node's peers file.
-   - `peer <hex-id> <hex-pubkey>` adds a peer key without a restart.
+   - `peer [<hex-id>] <hex-pubkey>` pins a peer key without a restart.
+   - `ident <hex-id>` asks a neighbor for its IDENT (its signed key and name).
    - `sos <text>` starts an SOS, repeated every 5 minutes with the current position. `sosstop` ends it.
    - `sosack <hex-id>` tells that node its SOS was heard.
 
 ### Keys
 
-- **Identity key** (`--key`, default `/var/lib/ghostwave/identity.key`). This is an X25519 secret
-  stored as 64 hex characters. It is created on first run with mode 600, in a mode-700 directory.
-  The public half is printed at startup and by `keys`.
-- **Peers** (`--peers FILE`). One `<hex-id> <hex-pubkey>` per line; `#` starts a comment.
+- **Identity key** (`--key`, default `/var/lib/ghostwave/identity.key`). This is an Ed25519 seed,
+  stored as `ed25519:` and 64 hex characters. It is created on first run with mode 600, in a
+  mode-700 directory. The node ID is the hash of the public key (DESIGN §3), so `--id` is optional;
+  if you pass it, it must match. The public key is printed at startup and by `keys`.
+- **Name** (`--name`, up to 9 bytes). Sent in this node's IDENT broadcasts (DESIGN §4.5).
+  Nodes that hear an IDENT learn our key on first use and print `IDENT new peer <id> "<name>"`.
+- **Old key files.** Before IDENT, the key file held a bare X25519 secret. The daemon now refuses
+  such a file. Either move it aside, so a new Ed25519 identity is made (this gives a new node ID,
+  so peers must update their peers files), or run with `--legacy-x25519`. That keeps the old key
+  and `--id`, and still learns peers from IDENT, but it cannot send one.
+- **Peers** (`--peers FILE`). One `[<hex-id>] <hex-pubkey>` per line; `#` starts a comment.
+  A bare key is the peer's Ed25519 key. It must hash to the ID, and the ID may be left out.
+  For a `--legacy-x25519` node, write `<hex-id> x25519:<hex-pubkey>`, as its `keys` prints.
   Messages to a listed peer are sealed with a DM key, which only the two of you can open.
+  A listed key is pinned: it overrides anything learned from IDENT. If a signed IDENT ever
+  brings a different key for a known ID, the daemon prints a `KEY CHANGE` warning and keeps
+  the old key.
 - **Channel key** (`--psk FILE`, optional). 32 bytes, as 64 hex characters or raw.
   Make one with `openssl rand -hex 32`. It seals messages to anyone not in the peers file.
   Every node with the same file can read them.
@@ -103,7 +116,9 @@ power at the default 10 dBm.
    ```
    On B, use `--lat 46.8710 --lon -113.9900`. This is a made-up position 110 m north; the boards can
    still sit on the same bench. Each node prints
-   `ghostwaved node <id> ...` and `key <pubkey>, ...`.
+   `ghostwaved node <id> ...` and `key ed25519 <pubkey>, ...`. Within a minute each node
+   should also print `IDENT new peer <id>` for the other. That key is trusted on first use;
+   the next step pins it instead.
 2. **Swap public keys.** Type `keys` on each node. Stop both nodes with Ctrl-C. On each Pi, run
    `sudo mkdir -p /etc/ghostwave`. Copy A's `keys` line into `/etc/ghostwave/peers` on B, and B's line
    into the same file on A.
