@@ -1,0 +1,14 @@
+{
+  "name": "ridgeline_core",
+  "version": "0.1.0",
+  "description": "Ridgeline portable core (firmware/core), built in place",
+  "frameworks": "*",
+  "platforms": "*",
+  "dependencies": [{ "name": "monocypher" }],
+  "build": {
+    "srcDir": "../../../core/src",
+    "includeDir": "../../../core/include",
+    "flags": ["-std=gnu++17", "-Wall", "-Wextra"],
+    "unflags": ["-std=gnu++11"]
+  }
+}

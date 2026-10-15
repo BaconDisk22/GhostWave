@@ -23,6 +23,31 @@ jobs:
         working-directory: firmware
         run: ./build/ridgeline_tests
 
+  mcu-build:
+    name: MCU build (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [heltec_wireless_tracker_v2, heltec_v3]
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4.2.3
+        with:
+          path: |
+            ~/.platformio/packages
+            ~/.platformio/platforms
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/mcu/platformio.ini') }}
+      - name: Install PlatformIO
+        run: pip install platformio==6.2.0
+      - name: Build
+        working-directory: firmware/mcu
+        run: pio run -e ${{ matrix.env }}
+
   sim-smoke:
     name: Sim smoke test
     runs-on: ubuntu-latest

@@ -34,7 +34,13 @@ firmware/core/         portable C++17 protocol core (packet codec + AEAD, router
 firmware/tests/        host tests, including multi-node runs over a simulated radio
 firmware/third_party/  Monocypher 4.0.2 (vendored, pinned; BSD-2 / CC0)
 firmware/pi/           ridgelined: Raspberry Pi daemon for the Backcountry Signal HAT (RadioLib)
+firmware/mcu/          PlatformIO firmware for ESP32-S3 dev boards (Heltec Wireless Tracker V2, Heltec V3)
 ```
+
+## Run on a dev board
+
+See [firmware/mcu/README.md](firmware/mcu/README.md) for flashing, the serial CLI and a two-board
+over-the-air test (encrypted DM + SOS). Quick version: `cd firmware/mcu && pio run -e heltec_v3 -t upload`.
 
 ## Run the simulator
 
