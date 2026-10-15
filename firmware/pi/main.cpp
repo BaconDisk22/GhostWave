@@ -4,20 +4,29 @@
 // Default pins (BCM) match the HAT and Meshtastic's lora-pimesh-1w-v2 preset:
 //   CS 8 (CE0)  DIO1 6  BUSY 5  RESET 18  module EN 26 (held high in config.txt)
 //
-// Usage: sudo ./ghostwaved [--id HEX] [--freq MHz] [--power dBm] [--gps /dev/serial0]
-//                          [--lat L --lon L]  (fixed position, no GPS)
-//                          [--key FILE] [--psk FILE] [--peers FILE]
+// Usage: sudo ./ghostwaved [--id HEX] [--name NAME] [--freq MHz] [--power dBm]
+//                          [--gps /dev/serial0] [--lat L --lon L]  (fixed position, no GPS)
+//                          [--key FILE] [--psk FILE] [--peers FILE] [--legacy-x25519]
 //                          [--require-enc] [--responder]
 // stdin commands:  send <hex-id> <text> | known <hex-id> <lat> <lon> | stats | pos
-//                  keys | peer <hex-id> <hex-pubkey>
+//                  keys | peer [<hex-id>] <hex-pubkey> | ident <hex-id>
 //                  sos <text> | sosstop | sosack <hex-id>
 //
-// Key files (DESIGN §9.1):
-//   --key    X25519 identity secret, 64 hex chars (or 32 raw bytes). Created with
-//            mode 600 if missing. Default /var/lib/ghostwave/identity.key.
-//   --psk    optional channel key, same format. Generate: openssl rand -hex 32
+// Identity (DESIGN §3, §4.5): --key holds an Ed25519 seed as "ed25519:<64 hex>".
+// It is created with mode 600 if missing. Default /var/lib/ghostwave/identity.key.
+// The node ID is nodeIdOf(public key), so --id is optional and must match it.
+// --name (up to 9 bytes) goes out in our IDENT broadcasts.
+//
+// Older key files hold a bare X25519 secret (64 hex chars or 32 raw bytes). The
+// daemon refuses them: move the file aside to make an Ed25519 identity, which
+// gives a new node ID, or run with --legacy-x25519. That mode keeps the old key
+// and --id, learns peers from IDENT, but cannot send one.
+//
+// Other key files (DESIGN §9.1):
+//   --psk    optional channel key, 64 hex chars or 32 raw bytes. Generate: openssl rand -hex 32
 //   --peers  optional "<hex-id> <hex-pubkey>" lines ('#' comments), as printed
-//            by the `keys` command on the other node.
+//            by the `keys` command on the other node. A bare key is Ed25519 and
+//            must hash to the ID; prefix "x25519:" for a legacy node's key.
 #include <RadioLib.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -45,6 +54,7 @@ namespace {
 
 struct Options {
   uint32_t id = 0;
+  std::string name;
   float freqMHz = 914.875f;     // clear of Meshtastic/MeshCore US defaults
   int8_t powerDbm = 10;         // SX1262 drive; the E22P PA adds ~8–10 dB. Check your rules.
   uint8_t syncWord = 0x24;      // private: keeps other meshes' frames out at the PHY
@@ -54,7 +64,7 @@ struct Options {
   int pinCs = 8, pinIrq = 6, pinRst = 18, pinBusy = 5;
   std::string keyFile = "/var/lib/ghostwave/identity.key";
   std::string pskFile, peersFile;
-  bool requireEnc = false, responder = false;
+  bool requireEnc = false, responder = false, legacyX25519 = false;
 };
 
 using Key32 = std::array<uint8_t, gw::kKeySize>;
@@ -111,6 +121,14 @@ bool fromHex(const std::string& s, uint8_t* out, size_t n) {
   return true;
 }
 
+// Prefix of an Ed25519 identity file. A bare key is a legacy X25519 secret.
+const char kSeedTag[] = "ed25519:";
+const char kX25519Tag[] = "x25519:";
+
+bool startsWith(const std::string& s, const char* prefix) {
+  return s.compare(0, std::strlen(prefix), prefix) == 0;
+}
+
 bool parseId(const std::string& s, uint32_t& id) {
   if (s.empty() || s.size() > 8) return false;
   char* end = nullptr;
@@ -118,24 +136,28 @@ bool parseId(const std::string& s, uint32_t& id) {
   return *end == '\0' && id != 0;
 }
 
-// Reads a 32-byte key: exactly 32 raw bytes, or 64 hex chars plus optional
-// whitespace. The file buffer is wiped before returning.
-bool readKeyFile(const std::string& path, Key32& key) {
+// Reads a 32-byte key. With an empty tag: exactly 32 raw bytes, or 64 hex
+// chars plus optional whitespace. With a tag: the tag, then 64 hex chars. The
+// file buffer is wiped before returning.
+bool readKeyFile(const std::string& path, Key32& key, const char* tag = "") {
   int fd = open(path.c_str(), O_RDONLY);
   if (fd < 0) return false;
   char buf[160];
   ssize_t n = read(fd, buf, sizeof buf);
   close(fd);
   bool ok = false;
-  if (n == static_cast<ssize_t>(gw::kKeySize)) {
+  if (n == static_cast<ssize_t>(gw::kKeySize) && !*tag) {
     std::memcpy(key.data(), buf, gw::kKeySize);
     ok = true;
   } else if (n > 0) {
     std::string hex;
     for (ssize_t i = 0; i < n; ++i)
       if (!std::isspace(static_cast<unsigned char>(buf[i]))) hex += buf[i];
-    ok = fromHex(hex, key.data(), key.size());
-    gw::wipe(&hex[0], hex.size());
+    if (startsWith(hex, tag)) {
+      hex.erase(0, std::strlen(tag));   // in place, so no unwiped copy
+      ok = fromHex(hex, key.data(), key.size());
+    }
+    if (!hex.empty()) gw::wipe(&hex[0], hex.size());
   }
   gw::wipe(buf, sizeof buf);
   return ok;
@@ -154,29 +176,66 @@ bool randomBytes(uint8_t* out, size_t n) {
   return got == n;
 }
 
-// Loads the identity secret, creating it (mode 600, parent dir 700) if missing.
-bool loadIdentity(const std::string& path, Key32& secret) {
+// Makes an Ed25519 seed whose node ID is usable (DESIGN §3). About 1 in 65536
+// keys is not, so a few tries are plenty.
+bool newSeed(Key32& seed) {
+  Key32 pub;
+  for (int i = 0; i < 16; ++i) {
+    if (!randomBytes(seed.data(), seed.size())) return false;
+    gw::ed25519Public(seed.data(), pub.data());
+    if (gw::nodeIdUsable(gw::nodeIdOf(pub.data()))) return true;
+  }
+  return false;
+}
+
+// Loads the identity key, creating an Ed25519 seed (mode 600, parent dir 700)
+// if the file is missing. Sets `legacy` if the file holds a bare X25519 secret,
+// which is an error unless `allowLegacy`.
+bool loadIdentity(const std::string& path, bool allowLegacy, Key32& secret, bool& legacy) {
+  legacy = false;
   struct stat st{};
   if (stat(path.c_str(), &st) == 0) {
     if (st.st_mode & (S_IRWXG | S_IRWXO))
       std::fprintf(stderr, "warning: %s is readable by others; chmod 600 it\n", path.c_str());
-    if (readKeyFile(path, secret)) return true;
-    std::fprintf(stderr, "bad identity key in %s (want 64 hex chars)\n", path.c_str());
+    if (readKeyFile(path, secret, kSeedTag)) {
+      if (!allowLegacy) return true;
+      gw::wipe(secret.data(), secret.size());
+      std::fprintf(stderr, "%s holds an Ed25519 identity; drop --legacy-x25519\n", path.c_str());
+      return false;
+    }
+    if (readKeyFile(path, secret)) {
+      legacy = true;
+      if (allowLegacy) return true;
+      gw::wipe(secret.data(), secret.size());
+      std::fprintf(stderr,
+                   "%s holds a legacy X25519 key, from before Ed25519 identities (DESIGN §4.5).\n"
+                   "Either move it aside so a new Ed25519 identity is made (new node ID; peers\n"
+                   "must update their peers files), or run with --legacy-x25519 to keep it\n"
+                   "(this node then cannot send IDENT).\n",
+                   path.c_str());
+      return false;
+    }
+    std::fprintf(stderr, "bad identity key in %s (want %s and 64 hex chars)\n", path.c_str(), kSeedTag);
+    return false;
+  }
+  if (allowLegacy) {
+    std::fprintf(stderr, "--legacy-x25519 needs an existing key file; %s is missing\n", path.c_str());
     return false;
   }
   size_t slash = path.rfind('/');
   if (slash != std::string::npos && slash > 0) mkdir(path.substr(0, slash).c_str(), 0700);
-  if (!randomBytes(secret.data(), secret.size())) {
+  if (!newSeed(secret)) {
     std::fprintf(stderr, "cannot read /dev/urandom\n");
     return false;
   }
   int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
   if (fd < 0) {
     std::fprintf(stderr, "cannot create %s: %s\n", path.c_str(), std::strerror(errno));
+    gw::wipe(secret.data(), secret.size());
     return false;
   }
   fchmod(fd, 0600);   // in case the umask was odd
-  std::string hex = toHex(secret.data(), secret.size()) + "\n";
+  std::string hex = kSeedTag + toHex(secret.data(), secret.size()) + "\n";
   bool ok = write(fd, hex.data(), hex.size()) == static_cast<ssize_t>(hex.size());
   ok = (fsync(fd) == 0) && ok;
   close(fd);
@@ -184,20 +243,52 @@ bool loadIdentity(const std::string& path, Key32& secret) {
   if (!ok) {
     std::fprintf(stderr, "cannot write %s\n", path.c_str());
     unlink(path.c_str());
+    gw::wipe(secret.data(), secret.size());
     return false;
   }
-  std::fprintf(stderr, "generated new identity key %s\n", path.c_str());
+  std::fprintf(stderr, "generated new Ed25519 identity %s\n", path.c_str());
   return true;
 }
 
-bool addPeer(gw::Router& r, const std::string& idHex, const std::string& pubHex) {
-  uint32_t id;
-  uint8_t pub[gw::kKeySize];
-  if (!parseId(idHex, id) || !fromHex(pubHex, pub, sizeof pub)) return false;
-  return r.addPeerKey(id, pub);
+// Pins a peer key. `pubHex` is an Ed25519 key, which must hash to the ID, or
+// "x25519:" and a legacy node's key. An empty `idHex` takes the ID from the
+// Ed25519 key. Fills `err` on failure.
+bool addPeer(gw::Router& r, const std::string& idHex, const std::string& pubHex, std::string& err) {
+  uint32_t id = 0;
+  if (!idHex.empty() && !parseId(idHex, id)) {
+    err = "bad id (want up to 8 hex digits)";
+    return false;
+  }
+  uint8_t pub[gw::kKeySize], xPub[gw::kKeySize];
+  bool x25519 = startsWith(pubHex, kX25519Tag);
+  if (!fromHex(x25519 ? pubHex.substr(std::strlen(kX25519Tag)) : pubHex, pub, sizeof pub)) {
+    err = "bad key (want 64 hex chars, or x25519: and 64 hex chars)";
+    return false;
+  }
+  if (x25519) {
+    if (!id) {
+      err = "an x25519: key needs its node id";
+      return false;
+    }
+    std::memcpy(xPub, pub, sizeof xPub);
+  } else {
+    uint32_t keyId = gw::nodeIdOf(pub);
+    if (!id) id = keyId;
+    if (id != keyId || !gw::nodeIdUsable(keyId)) {
+      char b[96];
+      std::snprintf(b, sizeof b, "Ed25519 key belongs to node %08x, not %08x (legacy key? prefix %s)",
+                    keyId, id, kX25519Tag);
+      err = b;
+      return false;
+    }
+    gw::ed25519ToX25519(pub, xPub);
+  }
+  if (r.addPeerKey(id, xPub)) return true;
+  err = "key rejected (low-order key, or peer table full)";
+  return false;
 }
 
-// One "<hex-id> <hex-pubkey>" per line; blank lines and '#' comments skipped.
+// One "[<hex-id>] <hex-pubkey>" per line; blank lines and '#' comments skipped.
 // Returns the number of keys added, or -1 if the file cannot be opened.
 int loadPeers(const std::string& path, gw::Router& r) {
   std::ifstream f(path);
@@ -209,11 +300,11 @@ int loadPeers(const std::string& path, gw::Router& r) {
     size_t hash = line.find('#');
     if (hash != std::string::npos) line.erase(hash);
     std::istringstream in(line);
-    std::string id, pub;
+    std::string id, pub, err;
     if (!(in >> id)) continue;
-    in >> pub;
-    if (addPeer(r, id, pub)) ++n;
-    else std::fprintf(stderr, "%s:%d: bad peer line (want <hex-id> <64 hex chars>)\n", path.c_str(), lineNo);
+    if (!(in >> pub)) pub.swap(id);
+    if (addPeer(r, id, pub, err)) ++n;
+    else std::fprintf(stderr, "%s:%d: bad peer line: %s\n", path.c_str(), lineNo, err.c_str());
   }
   return n;
 }
@@ -263,10 +354,35 @@ class StdoutApp : public gw::AppPort {
     std::printf("SOSACK from %08x for seq %u\n", responder, seq);
     std::fflush(stdout);
   }
+  void onPeerIdent(uint32_t id, const std::string& name, bool firstSeen) override {
+    std::printf("IDENT %s %08x \"%s\"\n", firstSeen ? "new peer" : "renamed", id, printable(name).c_str());
+    std::fflush(stdout);
+  }
+  void onKeyChange(uint32_t id, const uint8_t newEdPub[32], const std::string& name) override {
+    std::printf("WARNING: KEY CHANGE for %08x \"%s\": a signed IDENT carries a different key.\n"
+                "  Node IDs are key hashes, so this is a forged ID collision or a mistake (DESIGN §9.2).\n"
+                "  Still using the old key. To accept the new one: peer %08x %s\n",
+                id, printable(name).c_str(), id, toHex(newEdPub, gw::kKeySize).c_str());
+    std::fflush(stdout);
+  }
+
+ private:
+  // Names come off the air: keep control bytes out of the terminal.
+  static std::string printable(const std::string& s) {
+    std::string out;
+    for (unsigned char c : s) out += (c >= 0x20 && c < 0x7F && c != '"') ? static_cast<char>(c) : '?';
+    return out;
+  }
+};
+
+// Our public key: Ed25519, or X25519 for a --legacy-x25519 node.
+struct PubKey {
+  Key32 key{};
+  bool legacy = false;
 };
 
 void handleCommand(const std::string& line, gw::Router& r, const gw::Position& pos,
-                   const Key32& pub) {
+                   const PubKey& pub) {
   std::istringstream in(line);
   std::string cmd;
   in >> cmd;
@@ -287,19 +403,31 @@ void handleCommand(const std::string& line, gw::Router& r, const gw::Position& p
   } else if (cmd == "stats") {
     auto& s = r.stats();
     std::printf("tx %u rx %u bad %u authfail %u delivered %u forwarded %u stored %u air %llums "
-                "store %zu nb %zu sos held %zu sent %u heard %u%s\n",
+                "store %zu nb %zu sos held %zu sent %u heard %u ident tx %u rx %u bad %u keychg %u%s\n",
                 s.tx, s.rx, s.rxBad, s.rxAuthFail, s.delivered, s.forwarded, s.stored,
                 static_cast<unsigned long long>(s.airMs), r.storeSize(), r.neighborCount(nowMs()),
-                r.sosCount(), s.sosTx, s.sosHeard, r.sosActive() ? " SOS-ACTIVE" : "");
+                r.sosCount(), s.sosTx, s.sosHeard, s.identTx, s.identRx, s.identBad, s.keyChanges,
+                r.sosActive() ? " SOS-ACTIVE" : "");
   } else if (cmd == "pos") {
     std::printf("%s %.6f %.6f\n", pos.valid ? "fix" : "nofix", pos.lat, pos.lon);
   } else if (cmd == "keys") {
     // same format as a --peers line, so it can be pasted on the other node
-    std::printf("%08x %s\n", r.id(), toHex(pub.data(), pub.size()).c_str());
+    std::printf("%08x %s%s\n", r.id(), pub.legacy ? kX25519Tag : "",
+                toHex(pub.key.data(), pub.key.size()).c_str());
   } else if (cmd == "peer") {
-    std::string id, hex;
+    std::string id, hex, err;
     in >> id >> hex;
-    std::printf(addPeer(r, id, hex) ? "ok\n" : "bad peer (want <hex-id> <64 hex chars>)\n");
+    if (hex.empty()) hex.swap(id);
+    if (hex.empty()) std::printf("usage: peer [<hex-id>] <hex-pubkey>\n");
+    else if (addPeer(r, id, hex, err)) std::printf("ok\n");
+    else std::printf("bad peer: %s\n", err.c_str());
+  } else if (cmd == "ident") {
+    std::string id;
+    in >> id;
+    uint32_t dst;
+    if (!parseId(id, dst)) std::printf("usage: ident <hex-id>\n");
+    else if (r.requestIdent(dst, nowMs())) std::printf("asked %08x for its IDENT\n", dst);
+    else std::printf("cannot ask: no Ed25519 identity (--legacy-x25519)\n");
   } else if (cmd == "sos") {
     std::string text;
     std::getline(in, text);
@@ -320,7 +448,8 @@ void handleCommand(const std::string& line, gw::Router& r, const gw::Position& p
     else std::printf("no SOS held from %08x\n", src);
   } else if (!cmd.empty()) {
     std::printf("commands: send <hex-id> <text> | known <hex-id> <lat> <lon> | stats | pos\n"
-                "          keys | peer <hex-id> <hex-pubkey> | sos <text> | sosstop | sosack <hex-id>\n");
+                "          keys | peer [<hex-id>] <hex-pubkey> | ident <hex-id>\n"
+                "          sos <text> | sosstop | sosack <hex-id>\n");
   }
   std::fflush(stdout);
 }
@@ -332,7 +461,10 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
-    if (a == "--id") o.id = std::strtoul(next(), nullptr, 16);
+    if (a == "--id") {
+      if (!parseId(next(), o.id)) { std::fprintf(stderr, "bad --id (want up to 8 hex digits)\n"); return 2; }
+    }
+    else if (a == "--name") o.name = next();
     else if (a == "--freq") o.freqMHz = std::atof(next());
     else if (a == "--power") o.powerDbm = static_cast<int8_t>(std::atoi(next()));
     else if (a == "--gps") o.gpsDev = next();
@@ -343,16 +475,42 @@ int main(int argc, char** argv) {
     else if (a == "--peers") o.peersFile = next();
     else if (a == "--require-enc") o.requireEnc = true;
     else if (a == "--responder") o.responder = true;
+    else if (a == "--legacy-x25519") o.legacyX25519 = true;
     else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
   }
-  if (!o.id) o.id = machineId();
   g_irqPin = o.pinIrq;
+  if (o.name.size() > gw::kIdentNameMax) {
+    std::fprintf(stderr, "--name is %zu bytes; at most %zu fit in an IDENT\n", o.name.size(), gw::kIdentNameMax);
+    return 2;
+  }
+  if (o.legacyX25519 && !o.name.empty()) {
+    std::fprintf(stderr, "--name needs an Ed25519 identity; a --legacy-x25519 node sends no IDENT\n");
+    return 2;
+  }
 
   // Keys first: no point bringing the radio up if they are unusable. The
   // Router does not touch the radio until onReceive / tick.
-  Key32 secret{}, pub{}, psk{};
-  if (!loadIdentity(o.keyFile, secret)) return 1;
-  gw::x25519Public(secret.data(), pub.data());
+  Key32 secret{}, psk{};
+  PubKey pub;
+  if (!loadIdentity(o.keyFile, o.legacyX25519, secret, pub.legacy)) return 1;
+  if (pub.legacy) {
+    gw::x25519Public(secret.data(), pub.key.data());
+    if (!o.id) o.id = machineId();
+  } else {
+    gw::ed25519Public(secret.data(), pub.key.data());
+    uint32_t keyId = gw::nodeIdOf(pub.key.data());
+    if (!gw::nodeIdUsable(keyId)) {
+      std::fprintf(stderr, "the key in %s gives unusable node ID %08x; move it aside to make a new one\n",
+                   o.keyFile.c_str(), keyId);
+      return 1;
+    }
+    if (o.id && o.id != keyId) {
+      std::fprintf(stderr, "--id %08x does not match the identity key in %s, which is node %08x\n",
+                   o.id, o.keyFile.c_str(), keyId);
+      return 1;
+    }
+    o.id = keyId;
+  }
   bool havePsk = false;
   if (!o.pskFile.empty()) {
     if (!readKeyFile(o.pskFile, psk)) {
@@ -369,7 +527,12 @@ int main(int argc, char** argv) {
   PiRadio radio;
   StdoutApp app;
   gw::Router router(cfg, radio, app);
-  router.setIdentityKey(secret.data());
+  if (pub.legacy) {
+    router.setIdentityKey(secret.data());
+  } else if (!router.setSigningKey(secret.data(), o.name)) {
+    std::fprintf(stderr, "setSigningKey failed\n");   // ID and name were checked above
+    return 1;
+  }
   gw::wipe(secret.data(), secret.size());
   if (havePsk) router.setChannelKey(psk.data());
   gw::wipe(psk.data(), psk.size());
@@ -404,8 +567,11 @@ int main(int argc, char** argv) {
   if (!o.fixedPos && gps < 0) std::fprintf(stderr, "warning: cannot open %s, no position\n", o.gpsDev.c_str());
 
   std::printf("ghostwaved node %08x on %.3f MHz, %d dBm drive\n", o.id, o.freqMHz, o.powerDbm);
-  std::printf("key %s, channel key %s, %d peer key%s%s%s\n", toHex(pub.data(), pub.size()).c_str(),
-              havePsk ? "on" : "off", peers, peers == 1 ? "" : "s",
+  if (pub.legacy)
+    std::printf("key x25519:%s (legacy, no IDENT)", toHex(pub.key.data(), pub.key.size()).c_str());
+  else
+    std::printf("key ed25519 %s, name \"%s\"", toHex(pub.key.data(), pub.key.size()).c_str(), o.name.c_str());
+  std::printf(", channel key %s, %d peer key%s%s%s\n", havePsk ? "on" : "off", peers, peers == 1 ? "" : "s",
               o.requireEnc ? ", plaintext DATA refused" : "", o.responder ? ", SOS responder" : "");
   std::fflush(stdout);
 
