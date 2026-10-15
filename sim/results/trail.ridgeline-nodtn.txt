@@ -1,0 +1,5 @@
+trail        ridgeline-nodtn      pdr=0.998 pdr60=0.998 lat_med=    0.8s air/msg=  5.65s util=0.150 tx=4082 lost=8072
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| trail | ridgeline-nodtn | 99.8 % | 99.8 % | 0.8 s | 5.65 s | 15.0 % |

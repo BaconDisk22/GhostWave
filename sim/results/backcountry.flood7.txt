@@ -1,0 +1,5 @@
+backcountry  flood7               pdr=0.629 pdr60=0.602 lat_med=    2.5s air/msg= 30.24s util=0.414 tx=12502 lost=12091
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| backcountry | flood7 | 62.9 % | 60.2 % | 2.5 s | 30.24 s | 41.4 % |

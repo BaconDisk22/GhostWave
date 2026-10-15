@@ -1,0 +1,5 @@
+trail        ridgeline-noarea     pdr=1.000 pdr60=1.000 lat_med=    1.3s air/msg=  6.80s util=0.181 tx=5026 lost=19663
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| trail | ridgeline-noarea | 100.0 % | 100.0 % | 1.3 s | 6.80 s | 18.1 % |
