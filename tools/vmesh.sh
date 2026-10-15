@@ -42,11 +42,12 @@ fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/vmesh.XXXXXX")
 PIDS=()
+STATUS=1
 cleanup() {
   exec 3>&- 4>&- 5>&- 6>&- 2>/dev/null || true
   for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
   wait 2>/dev/null || true
-  if [ "$KEEP" = 1 ]; then echo "work directory kept: $WORK"; else rm -rf "$WORK"; fi
+  if [ "$KEEP" = 1 ] || [ "$STATUS" != 0 ]; then echo "work directory kept: $WORK"; else rm -rf "$WORK"; fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -74,7 +75,7 @@ start() {
   local name=$1 id=$2 fd=$3
   shift 3
   mkfifo "$WORK/$name.in"
-  "$BIN" --radio udp --mcast "$GROUP:$PORT" ${VIF:+--vif "$VIF"} --id "$id" \
+  "$BIN" --radio udp --mcast "$GROUP:$PORT" ${VIF:+--vif "$VIF"} --vlog --id "$id" \
     --key "$WORK/$name.key" "$@" <"$WORK/$name.in" >"$WORK/$name.log" 2>&1 &
   PIDS+=($!)
   eval "exec $fd>\"\$WORK/\$name.in\""
@@ -132,15 +133,20 @@ SECRET="meet at the saddle at 3pm"
 echo "== A -> D encrypted DM: \"$SECRET\"  (D is 11 km away, no path)"
 say 3 "known $ID_D $(lat_at 11) $LON0"
 say 3 "send $ID_D $SECRET"
+# B has no neighbor closer to D: after its forward attempts it stores the DM
+t=0
+until last B "^tx " | grep -Eq "store [1-9]"; do
+  [ "$t" -ge 60 ] && fail "B never took custody of the DM"
+  say 4 stats
+  sleep 2
+  t=$((t + 2))
+done
+last B "^tx "
 echo "== A raises an SOS"
 say 3 "sos broken leg"
 wait_for B "^SOS from $ID_A" 30 || fail "B never heard A's SOS"
 show B "^SOS from"
 wait_for A "^SOSACK from $ID_B" 30 && show A "^SOSACK"
-sleep 10
-say 4 stats
-sleep 1
-show B "^tx "
 grep -Eq "MSG|SOS from" "$WORK/D.log" && fail "D got something before B moved: chain not partitioned?"
 echo "   D has nothing yet (partitioned)"
 
@@ -174,3 +180,4 @@ fi
 echo "  sniffer: $(wc -c <"$WORK/air.bin" | tr -d ' ') bytes captured; DM text never in clear"
 LC_ALL=C grep -q -a -F "broken leg" "$WORK/air.bin" && echo "  (SOS text is sent in clear by design, DESIGN §8)"
 echo "PASS: encrypted DM and SOS reached D across a partition"
+STATUS=0
