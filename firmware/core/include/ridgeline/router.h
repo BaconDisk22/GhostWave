@@ -1,6 +1,6 @@
 // Ridgeline router: contention-based geographic forwarding, DTN custody store,
 // spray-and-wait, airtime budget and CSMA (docs/DESIGN.md §5–6), the SOS lane
-// (§8) and DATA encryption (§9.1).
+// (§8), DATA encryption (§9.1) and IDENT key exchange (§4.5).
 //
 // Platform-agnostic: the host supplies a RadioPort (send / CAD), an AppPort
 // (delivery callbacks), a position, and calls tick() every few milliseconds.
@@ -49,6 +49,18 @@ class AppPort {
   virtual void onSos(const SosInfo& sos) { (void)sos; }
   // A responder acknowledged our SOS.
   virtual void onSosAck(uint32_t responder, uint16_t seq) { (void)responder, (void)seq; }
+  // A verified IDENT taught us a new peer key (trust on first use), or a known
+  // peer changed its name.
+  virtual void onPeerIdent(uint32_t id, const std::string& name, bool firstSeen) {
+    (void)id, (void)name, (void)firstSeen;
+  }
+  // A correctly signed IDENT for `id` carries a different key from the one we
+  // hold. Since node ID = hash(key), an honest node cannot do this: it means a
+  // brute-forced ID collision (DESIGN §9.2). The old key stays in use; call
+  // Router::addPeerKey(id, ed25519ToX25519(newEdPub)) to accept the new one.
+  virtual void onKeyChange(uint32_t id, const uint8_t newEdPub[32], const std::string& name) {
+    (void)id, (void)newEdPub, (void)name;
+  }
 };
 
 struct Config {
@@ -76,6 +88,8 @@ struct Config {
   uint32_t sosRepeatMs = 5 * 60 * 1000;
   uint32_t sosMinGapMs = 60 * 1000;  // originate at most 1 SOS per this
   size_t sosCapacity = 16;           // distinct originators held
+  uint32_t identIntervalMs = 60 * 60 * 1000;   // broadcast IDENT this often; 0 = only on request
+  size_t peerCapacity = 64;          // peer keys held (pinned + learned)
 };
 
 struct Key {
@@ -93,6 +107,7 @@ struct Key {
 struct RouterStats {
   uint32_t tx = 0, rx = 0, rxBad = 0, delivered = 0, forwarded = 0, stored = 0;
   uint32_t rxAuthFail = 0, sosHeard = 0, sosTx = 0;
+  uint32_t identTx = 0, identRx = 0, identBad = 0, keyChanges = 0;
   uint64_t airMs = 0;
 };
 
@@ -108,10 +123,22 @@ class Router {
   void addKnownPosition(uint32_t id, const Position& p, uint64_t observedMs);
   // Keys (DESIGN §9.1). DATA to a peer with a known key is sealed with the DM
   // key, else with the channel key if set, else sent with the CRC MIC only.
+  // setSigningKey sets our Ed25519 identity: it derives the X25519 secret (no
+  // separate setIdentityKey needed) and enables IDENT. False if the key's node
+  // ID (nodeIdOf) is not Config::nodeId or the name is over kIdentNameMax bytes.
+  bool setSigningKey(const uint8_t ed25519Seed[32], const std::string& name = "");
+  // X25519-only identity, for nodes without an Ed25519 key: can learn peers
+  // from IDENT but cannot send one.
   void setIdentityKey(const uint8_t x25519Secret[32]);
   void setChannelKey(const uint8_t key[32]);
-  // Call after setIdentityKey. False on a low-order key or a full table.
+  // Pins a key the host trusts (key file, QR code). Overrides any key learned
+  // from IDENT. Call after setIdentityKey / setSigningKey. False on a low-order
+  // key or a table full of pinned keys.
   bool addPeerKey(uint32_t id, const uint8_t x25519Public[32]);
+  bool hasPeerKey(uint32_t id) const { return peers_.count(id) != 0; }
+  // Asks a neighbor for its IDENT (1 hop; the request carries our own IDENT).
+  // False without a signing key.
+  bool requestIdent(uint32_t id, uint64_t nowMs);
 
   // Queue a message; returns its msg_id, or 0 if it cannot be sealed (too big).
   uint32_t send(uint32_t dst, const std::vector<uint8_t>& payload, uint64_t nowMs);
@@ -220,6 +247,11 @@ class Router {
   void onSosAck(const Packet& p, uint64_t now);
   void offerSos(uint32_t nbId, const uint8_t* bloom, uint64_t now);
   void sosTick(uint64_t now);
+  bool storePeer(uint32_t id, const uint8_t xPub[32], bool pinned, uint64_t now);
+  void sendIdent(uint32_t dst, uint64_t now);
+  void onIdent(const Packet& p, uint64_t now);
+  void wantIdent(uint32_t id, uint64_t now);
+  void identTick(uint64_t now);
 
   Config cfg_;
   RadioPort& radio_;
@@ -252,9 +284,23 @@ class Router {
   double util_ = 0;
   uint64_t beaconSoonAt_ = 0;   // early beacon so an SOS carrier sees our Bloom filter
 
-  bool haveIdKey_ = false, haveChanKey_ = false;
+  bool haveIdKey_ = false, haveChanKey_ = false, haveSigKey_ = false;
   std::array<uint8_t, 32> idKey_{}, chanKey_{};
-  std::map<uint32_t, std::array<uint8_t, 32>> dmKeys_;   // peer -> derived DM key
+  struct Peer {
+    std::array<uint8_t, 32> xPub;   // X25519, compared on every IDENT (TOFU)
+    std::array<uint8_t, 32> dm;     // derived DM key
+    std::string name;
+    bool pinned;                    // from addPeerKey: never evicted
+    uint64_t learnedMs;
+  };
+  std::map<uint32_t, Peer> peers_;
+  std::vector<uint8_t> identBody_;  // signed once in setSigningKey
+  uint64_t nextIdentAt_ = 0;        // periodic broadcast; 0 = not scheduled yet
+  uint64_t identReplyAt_ = 0;       // broadcast answering a request; 0 = none
+  uint64_t lastIdentT_ = 0;
+  bool identSent_ = false;
+  std::map<uint32_t, uint64_t> identWant_;    // neighbor -> when to ask for its IDENT
+  std::map<uint32_t, uint64_t> identAsked_;   // neighbor -> last time we asked
 
   std::map<uint32_t, SosEntry> sos_;   // by originator; newest seq only
   bool sosOn_ = false, sosEver_ = false;

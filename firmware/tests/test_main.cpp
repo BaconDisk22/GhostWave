@@ -1,5 +1,6 @@
 // Host tests for the Ridgeline core. No framework: each CHECK prints and counts.
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -7,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "monocypher-ed25519.h"
 #include "monocypher.h"
 #include "ridgeline/crypto.h"
 #include "ridgeline/packet.h"
@@ -258,10 +260,20 @@ struct TestApp : AppPort {
   std::vector<uint32_t> delivered;
   std::vector<SosInfo> sos;
   std::vector<std::pair<uint32_t, uint16_t>> sosAcks;
+  std::vector<std::pair<uint32_t, std::string>> idents;   // first-seen peers
+  std::vector<std::pair<uint32_t, std::array<uint8_t, 32>>> keyChanges;
   void onMessage(uint32_t src, uint32_t, const std::vector<uint8_t>& p) override { got.push_back({src, p}); }
   void onDelivered(uint32_t, uint32_t mid) override { delivered.push_back(mid); }
   void onSos(const SosInfo& s) override { sos.push_back(s); }
   void onSosAck(uint32_t who, uint16_t seq) override { sosAcks.push_back({who, seq}); }
+  void onPeerIdent(uint32_t id, const std::string& name, bool first) override {
+    if (first) idents.push_back({id, name});
+  }
+  void onKeyChange(uint32_t id, const uint8_t pub[32], const std::string&) override {
+    std::array<uint8_t, 32> k;
+    std::memcpy(k.data(), pub, 32);
+    keyChanges.push_back({id, k});
+  }
 };
 
 struct SimNode {
@@ -274,6 +286,7 @@ struct SimNode {
 struct Medium {
   std::vector<std::unique_ptr<SimNode>> nodes;
   double rangeM = 2500;
+  uint32_t identIntervalMs = 60 * 60 * 1000;
   uint64_t now = 0;
   uint32_t txCount = 0;
   std::vector<uint8_t> txTypes;
@@ -287,6 +300,7 @@ struct Medium {
     c.nodeId = id;
     c.responder = responder;
     c.rngSeed = id * 7919ull + 1;
+    c.identIntervalMs = identIntervalMs;
     n->router = std::make_unique<Router>(c, n->radio, n->app);
     n->pos = {45.0 + kmNorth * 0.0089932, -110.0 + kmEast * 0.0127, true};
     n->router->setPosition(n->pos, now);
@@ -504,6 +518,237 @@ static void testSosPartitionedChain() {
   CHECK(d.router->sosCount() == 0 && c.router->sosCount() == 0);
 }
 
+// ------------------------------------------------------------------- IDENT --
+
+static void hexTo(const char* hex, uint8_t* out, size_t n) {
+  for (size_t i = 0; i < n; ++i) {
+    unsigned v;
+    std::sscanf(hex + 2 * i, "%2x", &v);
+    out[i] = static_cast<uint8_t>(v);
+  }
+}
+
+// An Ed25519 seed whose node ID is usable, and that ID.
+static uint32_t identity(uint8_t seed[32], uint8_t start) {
+  uint8_t pub[32];
+  for (uint8_t s = start;; ++s) {
+    fillKey(seed, s);
+    ed25519Public(seed, pub);
+    if (nodeIdUsable(nodeIdOf(pub))) return nodeIdOf(pub);
+  }
+}
+
+static void testIdentCrypto() {
+  std::printf("ident: Ed25519, SHA-512 node ID, secret-key conversion, signed body\n");
+  // FIPS 180-2 SHA-512("abc"), first 16 bytes
+  uint8_t h[64], want[16];
+  crypto_sha512(h, reinterpret_cast<const uint8_t*>("abc"), 3);
+  hexTo("ddaf35a193617abacc417349ae204131", want, 16);
+  CHECK(std::memcmp(h, want, 16) == 0);
+
+  // RFC 8032 §7.1 test 1: monocypher-ed25519 is plain Ed25519
+  uint8_t seed[32], pub[32], wantPub[32], sig[64], wantSig[64], sk[64], tmp[32];
+  hexTo("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", seed, 32);
+  hexTo("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", wantPub, 32);
+  hexTo("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+        wantSig, 64);
+  ed25519Public(seed, pub);
+  CHECK(std::memcmp(pub, wantPub, 32) == 0);
+  std::memcpy(tmp, seed, 32);
+  crypto_ed25519_key_pair(sk, pub, tmp);
+  crypto_ed25519_sign(sig, sk, nullptr, 0);
+  CHECK(std::memcmp(sig, wantSig, 64) == 0);
+  CHECK(crypto_ed25519_check(sig, pub, nullptr, 0) == 0);
+
+  // node ID = first 4 bytes of SHA-512(pub), little-endian
+  crypto_sha512(h, pub, 32);
+  CHECK(nodeIdOf(pub) == (h[0] | h[1] << 8 | h[2] << 16 | static_cast<uint32_t>(h[3]) << 24));
+  CHECK(!nodeIdUsable(0) && !nodeIdUsable(kBroadcast) && !nodeIdUsable(0x12340000) && nodeIdUsable(0x12340001));
+
+  // Ed25519 secret -> X25519 secret agrees with the public-key conversion,
+  // so two Ed25519 identities derive the same DM key
+  uint8_t sa[32], sb[32], pa[32], pb[32], xa[32], xb[32], xpa[32], xpb[32], ka[32], kb[32];
+  identity(sa, 31);
+  identity(sb, 62);
+  ed25519Public(sa, pa);
+  ed25519Public(sb, pb);
+  ed25519SecretToX25519(sa, xa);
+  ed25519SecretToX25519(sb, xb);
+  x25519Public(xa, tmp);
+  ed25519ToX25519(pa, xpa);
+  ed25519ToX25519(pb, xpb);
+  CHECK(std::memcmp(tmp, xpa, 32) == 0);
+  CHECK(dmKey(xa, xpb, ka) && dmKey(xb, xpa, kb) && std::memcmp(ka, kb, 32) == 0);
+
+  // signed body: pub || sig || name
+  uint32_t ida = nodeIdOf(pa);
+  std::vector<uint8_t> body;
+  CHECK(identBody(sa, "KJ7RL-1", body) && body.size() == kIdentFixed + 7);
+  CHECK(std::memcmp(body.data(), pa, 32) == 0);
+  uint8_t got[32];
+  std::string name;
+  CHECK(identCheck(body, ida, got, name) && name == "KJ7RL-1" && std::memcmp(got, pa, 32) == 0);
+  CHECK(!identBody(sa, "ten bytes!", body) && identBody(sa, "nine byte", body));
+  CHECK(identCheck(body, ida, got, name) && name == "nine byte");
+  // the whole IDENT frame fits with a full-length name
+  Packet f;
+  f.type = PType::Ident;
+  f.mode = Mode::Unicast;
+  f.payload = body;
+  CHECK(encodedSize(f) == kMaxFrame);
+  auto bad = [&](size_t off, uint8_t mask, uint32_t src) {
+    std::vector<uint8_t> b = body;
+    if (off < b.size()) b[off] ^= mask;
+    std::string n;
+    return !identCheck(b, src, got, n);
+  };
+  CHECK(bad(0, 0, nodeIdOf(pb)));               // someone else's ID
+  CHECK(bad(0, 0x01, ida));                     // key (no longer hashes to ida)
+  CHECK(bad(40, 0x01, ida));                    // signature
+  CHECK(bad(kIdentFixed, 0x01, ida));           // name
+  std::vector<uint8_t> shortBody(body.begin(), body.begin() + kIdentFixed - 1);
+  CHECK(!identCheck(shortBody, ida, got, name));
+}
+
+static void testIdentExchange() {
+  std::printf("ident: two nodes, no preloaded keys, exchange IDENT then a DM\n");
+  Medium m;
+  uint8_t sa[32], sb[32];
+  uint32_t ida = identity(sa, 1), idb = identity(sb, 100);
+  auto& a = m.add(ida, 0);
+  auto& b = m.add(idb, 2);
+  uint8_t other[32];
+  fillKey(other, 200);
+  CHECK(!a.router->setSigningKey(other, "x"));            // key does not own this ID
+  CHECK(!a.router->setSigningKey(sa, "name too long"));
+  CHECK(a.router->setSigningKey(sa, "alice") && b.router->setSigningKey(sb, "bob"));
+  CHECK(!a.router->hasPeerKey(idb) && !b.router->hasPeerKey(ida));
+  m.run(20000);
+  CHECK(a.router->hasPeerKey(idb) && b.router->hasPeerKey(ida));
+  CHECK(a.app.idents.size() == 1 && a.app.idents[0] == std::make_pair(idb, std::string("bob")));
+  CHECK(b.app.idents.size() == 1 && b.app.idents[0] == std::make_pair(ida, std::string("alice")));
+  uint32_t identFrames = m.count(PType::Ident);
+  std::printf("  IDENT frames on air: %u\n", identFrames);
+  CHECK(identFrames >= 2 && identFrames <= 6);
+
+  // no channel key anywhere: the DM can only be sealed with the learned key
+  a.router->addKnownPosition(idb, b.pos, m.now);
+  std::string secret = "water at the spring";
+  CHECK(a.router->send(idb, std::vector<uint8_t>(secret.begin(), secret.end()), m.now) != 0);
+  m.run(20000);
+  CHECK(b.app.got.size() == 1 && std::string(b.app.got[0].second.begin(), b.app.got[0].second.end()) == secret);
+  CHECK(!onAir(m, secret));
+  CHECK(a.app.delivered.size() == 1);
+
+  // low rate afterwards: one broadcast each per identIntervalMs (1 h + <=10 % jitter)
+  identFrames = m.count(PType::Ident);
+  m.run(2ull * 3600 * 1000, 1000);
+  uint32_t later = m.count(PType::Ident) - identFrames;
+  CHECK(later >= 2 && later <= 4);
+}
+
+static void testIdentRequest() {
+  std::printf("ident: periodic off, keys learned by request from new neighbors\n");
+  Medium m;
+  m.identIntervalMs = 0;
+  uint8_t s[3][32];
+  uint32_t id[3];
+  const char* names[3] = {"a", "b", "c"};
+  for (int i = 0; i < 3; ++i) {
+    id[i] = identity(s[i], static_cast<uint8_t>(10 + 40 * i));
+    m.add(id[i], 0.5 * i);
+    CHECK(m.nodes[i]->router->setSigningKey(s[i], names[i]));
+  }
+  m.run(20000);
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j)
+      if (i != j) CHECK(m.nodes[i]->router->hasPeerKey(id[j]));
+  uint32_t n = m.count(PType::Ident);
+  std::printf("  IDENT frames on air: %u (3 nodes)\n", n);
+  CHECK(n <= 6);
+  // nothing more once everyone knows everyone
+  m.run(30 * 60 * 1000, 100);
+  CHECK(m.count(PType::Ident) == n);
+  // an explicit request still gets an answer
+  CHECK(m.nodes[0]->router->requestIdent(id[1], m.now));
+  m.run(20000);
+  CHECK(m.count(PType::Ident) == n + 2);
+}
+
+static void inject(SimNode& to, uint32_t src, uint32_t dst, const std::vector<uint8_t>& body, uint64_t now) {
+  Packet p;
+  p.type = PType::Ident;
+  p.mode = Mode::Unicast;
+  p.hopsLeft = 0;
+  p.src = src;
+  p.dst = dst;
+  p.msgId = 0x5150 ^ src;
+  p.prevHop = shortId(src);
+  p.payload = body;
+  uint8_t buf[kMaxFrame];
+  size_t n = encode(p, buf, sizeof buf);
+  CHECK(n > 0);
+  to.router->onReceive(buf, n, -100, now);
+}
+
+static void testIdentForgery() {
+  std::printf("ident: forged signature or mismatched ID rejected, key change warned\n");
+  Medium m;
+  uint8_t sr[32], sv[32], sx[32];
+  uint32_t idr = identity(sr, 3), idv = identity(sv, 70), idx = identity(sx, 140);
+  auto& r = m.add(idr, 0);
+  CHECK(r.router->setSigningKey(sr, "r"));
+  std::vector<uint8_t> victim, attacker;
+  CHECK(identBody(sv, "victim", victim) && identBody(sx, "victim", attacker));
+
+  // attacker signs its own key but claims the victim's ID
+  inject(r, idv, kBroadcast, attacker, m.now);
+  // victim's genuine body with the name changed: signature no longer matches
+  std::vector<uint8_t> renamed = victim;
+  renamed.back() ^= 0x20;
+  inject(r, idv, kBroadcast, renamed, m.now);
+  // victim's genuine body sent under the attacker's ID
+  inject(r, idx, kBroadcast, victim, m.now);
+  // random signature
+  std::vector<uint8_t> junk = victim;
+  for (size_t i = kKeySize; i < kIdentFixed; ++i) junk[i] = static_cast<uint8_t>(i * 37);
+  inject(r, idv, kBroadcast, junk, m.now);
+  CHECK(r.router->stats().identBad == 4 && r.router->stats().identRx == 0);
+  CHECK(!r.router->hasPeerKey(idv) && !r.router->hasPeerKey(idx) && r.app.idents.empty());
+  m.run(5000);
+  CHECK(m.count(PType::Ident) <= 1);            // no replies to forgeries (only r's own announce)
+
+  // the genuine one is accepted (TOFU)
+  inject(r, idv, kBroadcast, victim, m.now);
+  CHECK(r.router->hasPeerKey(idv) && r.app.idents.size() == 1 && r.app.idents[0].second == "victim");
+
+  // key change: r pinned a wrong key for a real node v; v's IDENT warns and
+  // does not replace it, so v's DMs fail until the host accepts the new key
+  Medium m2;
+  auto& r2 = m2.add(idr, 0);
+  auto& v2 = m2.add(idv, 2);
+  CHECK(r2.router->setSigningKey(sr, "r") && v2.router->setSigningKey(sv, "victim"));
+  uint8_t xx[32], px[32];
+  ed25519Public(sx, px);
+  ed25519ToX25519(px, xx);
+  CHECK(r2.router->addPeerKey(idv, xx));
+  m2.run(20000);
+  CHECK(!r2.app.keyChanges.empty() && r2.app.keyChanges[0].first == idv);
+  CHECK(r2.router->stats().keyChanges >= 1 && r2.app.idents.empty());
+  CHECK(v2.router->hasPeerKey(idr));
+  v2.router->addKnownPosition(idr, r2.pos, m2.now);
+  v2.router->send(idr, {'h', 'i'}, m2.now);
+  m2.run(20000);
+  CHECK(r2.app.got.empty() && r2.router->stats().rxAuthFail >= 1);
+  if (r2.app.keyChanges.empty()) return;
+  uint8_t accept[32];
+  ed25519ToX25519(r2.app.keyChanges[0].second.data(), accept);
+  CHECK(r2.router->addPeerKey(idv, accept));
+  v2.router->send(idr, {'h', 'i'}, m2.now);
+  m2.run(20000);
+  CHECK(r2.app.got.size() == 1);
+}
+
 int main() {
   testPacket();
   testAead();
@@ -515,6 +760,10 @@ int main() {
   testDuplicateSuppression();
   testEncryptedRouting();
   testSosPartitionedChain();
+  testIdentCrypto();
+  testIdentExchange();
+  testIdentRequest();
+  testIdentForgery();
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }

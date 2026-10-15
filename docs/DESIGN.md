@@ -49,11 +49,20 @@ document; see §11).
 ## 3. Identity and addressing
 
 - Each node owns an **Ed25519** keypair. The **node ID** is the first 4 bytes of
-  `SHA-256(pubkey)`. `0xFFFFFFFF` = broadcast.
+  `SHA-512(pubkey)`, read little-endian. `0xFFFFFFFF` = broadcast. A key whose ID is
+  `0`, `0xFFFFFFFF` or has short ID `0` (the anycast `next_hop`) is unusable: generate
+  another.
+  - *Why SHA-512, not SHA-256 (v0.1 draft):* Ed25519 already needs SHA-512, so it is
+    vendored anyway (Monocypher's optional `monocypher-ed25519`). SHA-256 would be a third
+    hash in the firmware. SHA-512 is also in every phone/web crypto API (WebCrypto,
+    CryptoKit, Android, Python), so a client can compute an ID from a QR-code key.
+    BLAKE2b, the other hash available, is missing from WebCrypto and CryptoKit.
+- The node's **X25519** key for DMs (§9.1) is derived from the Ed25519 key: public via
+  the Edwards→Montgomery map, secret as the first 32 bytes of `SHA-512(seed)`.
 - The **short ID** (2 bytes) is the low 16 bits of the node ID and is used only for
   link-local fields (previous hop / next hop), where a collision costs one wasted
   transmission, not a misdelivery.
-- Public keys are exchanged out of band (QR code) or via a signed `IDENT` packet (§4.4).
+- Public keys are exchanged out of band (QR code) or via a signed `IDENT` packet (§4.5).
 
 ---
 
@@ -114,7 +123,7 @@ UNICAST and add `dst_pos` en route. Everything else is authenticated end to end 
 | 0x02 | `ACK` | End-to-end delivery receipt; routed GEO back to `src_pos` |
 | 0x03 | `LINK_ACK` | Hop-by-hop ack: UNICAST receipt, "I already have custody" to a retrying upstream, and "it arrived" from a GEO frame's final recipient. Body: acked type (1) + acked src (4); `msg_id` in the header; `next_hop` = who it's for. |
 | 0x04 | `BEACON` | 1-hop presence: own position, velocity, location gossip, DTN summary |
-| 0x05 | `IDENT` | Signed public key + name (sent on request or at low rate) |
+| 0x05 | `IDENT` | Signed public key + name (sent on request or at low rate); see §4.5 |
 | 0x06 | `SOS` | Emergency; see §8 |
 | 0x07 | `SOS_ACK` | "Help acknowledged" from a responder |
 | 0x1F | reserved for extension (next byte = extended type) |
@@ -134,6 +143,47 @@ UNICAST and add `dst_pos` en route. Everything else is authenticated end to end 
 
 The beacon's own position is in `fwd_pos`. Size with 3 gossip entries: 19 + 6 + 13 + 33 + 4 =
 **75 bytes**. (The simulator models 64 B; the 11 extra bytes don't change any conclusion.)
+
+### 4.5 IDENT body
+
+```
+ 0   32   pub        Ed25519 public key; node ID = SHA-512(pub)[0..4] must equal header src
+ 32  64   sig        Ed25519 (RFC 8032) over "ridgeline-ident-v1" || pub || name
+ 96  0..9 name       short name / callsign, UTF-8, length = rest of the payload
+```
+
+Header: mode UNICAST, `hops_left` 0 (one hop, never forwarded), no positions, CRC32-C MIC.
+`dst` = broadcast is an **announcement**. `dst` = a node ID (with `next_hop` = its short
+ID) is a **request** for that node's IDENT. The body is the same either way, so every
+neighbor that hears a request learns the requester's key too. Size: 19 + 96 + name + 4 =
+**119–128 bytes**. A 9-byte name fills the 128-byte frame, which is why the name is short.
+Longer display names belong in application DATA.
+
+The signature does not cover the header, so a node signs once at startup and reuses the
+body.
+
+**When it is sent**
+- At start (1–15 s jitter), then every `identIntervalMs` (default 1 h, +0–10 % jitter,
+  stretched by channel utilization like beacons, §6.2). 0 disables periodic IDENTs.
+- **Request:** on a beacon from a neighbor whose key we lack, after 0.5–5 s jitter (dropped
+  if its key arrives meanwhile), at most once per neighbor per 10 min. Also
+  `Router::requestIdent()`.
+- **Reply:** a request addressed to us is answered with a *broadcast* IDENT after
+  0.1–1 s. Our IDENTs are at least 15 s apart, and requests in that window share one
+  reply.
+
+**On receive:** check length, `src == nodeId(pub)` and the signature. Then:
+- **Unknown node:** store the key (**trust on first use**), derive the DM key, and call
+  `AppPort::onPeerIdent`.
+- **Known node, same key:** update the name if it changed.
+- **Known node, different key:** keep the old key, count it, and call `AppPort::onKeyChange`.
+  The ID is a hash of the key, so an honest node cannot change keys under the same ID.
+  This means someone brute-forced a 32-bit ID collision (§9.2). The host can accept the
+  new key with `addPeerKey`.
+
+Keys from `addPeerKey` (key files, QR codes) are **pinned** and override IDENT. Learned keys
+share `peerCapacity` (64) with them. The oldest *learned* key is evicted when the table is
+full, so a peer that drops out loses its TOFU pin.
 
 ---
 
@@ -314,7 +364,8 @@ benefit**.
 
 ### 9.1 v1 (prototype)
 
-- **DMs:** X25519 ECDH between the Ed25519-derived keys, then a KDF, then ChaCha20-Poly1305
+- **DMs:** X25519 ECDH between the Ed25519-derived keys (§3), learned via IDENT (§4.5)
+  or pinned by the host, then a KDF, then ChaCha20-Poly1305
   (RFC 8439, 16-byte tag replacing the 4-byte MIC). The KDF is
   `BLAKE2b-256(shared || min(pubA, pubB) || max(pubA, pubB) || "ridgeline-dm-v1")`, not
   HKDF, because the Monocypher core has BLAKE2b but no SHA-256/HKDF.
@@ -326,17 +377,31 @@ benefit**.
   Relays forward ciphertext they can't read. A frame that fails authentication is dropped
   without touching the dedup cache, so a forgery can't block the real frame.
   `requireEncryption` drops plaintext DATA.
-- Only DATA is encrypted. ACK, LINK_ACK, BEACON and SOS keep the CRC32-C MIC.
+- Only DATA is encrypted. ACK, LINK_ACK, BEACON, IDENT and SOS keep the CRC32-C MIC.
+  IDENT is authenticated by its Ed25519 signature instead.
 - **Beacons:** 4-byte truncated MAC under the channel key (cheap; prevents casual spoofing,
   not a strong guarantee).
 - **Replay:** dedup cache plus the per-source msg_id window.
-- Library: Monocypher 4.0.2 core, vendored and pinned in `firmware/third_party/monocypher`
+- Library: Monocypher 4.0.2 core plus its optional `monocypher-ed25519` (SHA-512,
+  Ed25519), vendored and pinned in `firmware/third_party/monocypher`
   (hashes in its README), used on both MCU and Linux. The RFC 8439 test vector in the host tests
   checks that it interoperates with libsodium's `crypto_aead_chacha20poly1305_ietf`.
 - The nonce is unique only while `(src, msg_id)` is. `msg_id` is random 32-bit, so collisions
   become likely after ~65 k messages per source and key. Make it a persisted counter before v1.0.
 
 ### 9.2 Known weaknesses in v1
+
+- **32-bit IDs bind keys only weakly.** Finding a key whose ID collides with a given node's
+  takes about 2³² key generations: minutes to hours on a PC. An attacker who does that
+  *before* a victim's real IDENT reaches you wins trust on first use. Afterwards, the real
+  key is already held, and the attacker's IDENT only triggers `onKeyChange`. Protect
+  important contacts by pinning them (QR code / key file). Clients should show a key
+  fingerprint for out-of-band comparison.
+- IDENT has no timestamp. Anyone can replay a node's old signed IDENT, but all it can
+  change is the node's name back to an older one.
+- IDENT is one hop. A far-away node's key arrives only by pinning, or when that node comes
+  into range. Relays could re-broadcast cached IDENTs (they are self-certifying), but that
+  is not implemented.
 
 - `fwd_pos`/`dst_pos` are unauthenticated hop-to-hop, so a malicious node can attract or
   blackhole traffic (true of every LoRa mesh today). Mitigation planned: neighbor
@@ -397,11 +462,12 @@ Identity mapping is explicit (the user pairs contacts). The bridge never forward
 4. The forwarding area helps dense meshes a lot but costs sparse ones some latency (§14).
    The 10-neighbor gate is a first guess.
 5. Bridge identity model.
-6. Not yet implemented in firmware: IDENT, velocity in beacons, client protocol, the
-   regulatory duty-cycle cap, the beacon MAC (§9.1), Bloom-filter use on receive for DTN
-   *data* (it is used for SOS), and Ed25519 → X25519 *secret*-key conversion (needs SHA-512,
-   which isn't vendored; nodes are given an X25519 secret directly). Implemented since v0.1:
-   ChaCha20-Poly1305 AEAD for DATA (DM + channel keys) and the SOS lane (§8).
+6. Not yet implemented in firmware: velocity in beacons, client protocol, the
+   regulatory duty-cycle cap, the beacon MAC (§9.1), and Bloom-filter use on receive for DTN
+   *data* (it is used for SOS). Implemented since v0.1:
+   ChaCha20-Poly1305 AEAD for DATA (DM + channel keys), the SOS lane (§8), IDENT with
+   TOFU (§4.5), and Ed25519 → X25519 secret-key conversion (`Router::setSigningKey`). The
+   Pi daemon still loads an X25519 secret directly, so it does not send IDENT yet.
 7. SOS cost: in backcountry with 6 concurrent SOS events the lane spends ~3× flood3's SOS
    airtime, because every node holds and re-offers every SOS. Its reach to fixed nodes beats flood3 in the
    tail but not flood7 (§14). Worth trying: coarser (per-15-min) Bloom keys for updates,
