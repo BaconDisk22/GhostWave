@@ -33,7 +33,9 @@ sim/results/           raw output of the benchmark runs
 firmware/core/         portable C++17 protocol core (packet codec + AEAD, router, SOS, NMEA, airtime)
 firmware/tests/        host tests, including multi-node runs over a simulated radio
 firmware/third_party/  Monocypher 4.0.2 (vendored, pinned; BSD-2 / CC0)
-firmware/pi/           ghostwaved: Raspberry Pi daemon for the Backcountry Signal HAT (RadioLib)
+firmware/pi/           ghostwaved: Raspberry Pi daemon for the Backcountry Signal HAT (RadioLib),
+                       or with a UDP virtual radio on any Linux/macOS host
+tools/vmesh.sh         4-daemon virtual mesh demo: encrypted DM and SOS across a partition
 ```
 
 ## Run the simulator
@@ -49,7 +51,52 @@ SOS reach to fixed nodes: `python3 ghostsim.py --scenario backcountry --proto fl
 ## Build and test the core (any machine)
 
 ```bash
-cd firmware && cmake -S . -B build && cmake --build build && ./build/ghostwave_tests
+cd firmware && cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure
+```
+
+`ghostwave_tests` covers the core; `ghostwave_vchannel_tests` covers the virtual radio's channel model.
+
+## Virtual mesh (no hardware)
+
+`ghostwaved --radio udp` swaps the E22P for a virtual radio: every daemon on a UDP multicast group
+(default `239.77.0.1:47700`, TTL 1) hears every frame, and each receiver decides whether it would
+have decoded it over the air. It is the same channel model as `sim/ghostsim.py`: log-distance path
+loss (31.7 dB at 1 m, exponent 3.5), 5 dB Gaussian fading per frame, −129 dBm sensitivity, 6 dB
+capture, and half duplex. Frames between −135 and −129 dBm cannot be decoded but still collide.
+The derived RSSI goes to the router. `channelBusy` (CSMA) is true while a decodable frame's
+airtime (`airtimeMs`, SF9/BW125) overlaps now, or while we are sending.
+
+Each datagram carries the sender's position and EIRP, so position must come from `--lat/--lon` or
+`--nmea FILE`. The file can be a plain file or a FIFO of NMEA sentences, and it is followed like
+`tail -f`, so appending `$GPGGA` lines moves the node. Datagrams are numbered per sender: macOS
+loops multicast back on more than one path, so one frame can arrive twice, and the copies would
+otherwise collide with each other.
+
+Build it on Linux or macOS. It needs no lgpio or RadioLib:
+
+```bash
+cd firmware && cmake -S . -B build-virt -DGHOSTWAVE_BUILD_VIRT=ON && cmake --build build-virt
+./build-virt/ghostwaved --id a1 --key /tmp/a1.key --lat 46.50 --lon -114.0
+./build-virt/ghostwaved --id b2 --key /tmp/b2.key --lat 46.52 --lon -114.0 --vlog   # ~2.2 km north
+```
+
+The stdin commands are the same as on the Pi. `stats` adds a `vradio` line with frames heard,
+decoded, out of range, too weak, and collided. `--vlog` prints one line per frame heard, with its
+distance and RSSI. Other options: `--mcast GROUP:PORT` (a separate mesh), `--vif ADDR` (the
+interface to use, e.g. `127.0.0.1` on a host with no LAN), `--vtx-dbm` (EIRP, default 24 =
+22 dBm + 2 dBi), `--vgain` (receive antenna gain, default 2 dBi), and `--vfade 0` (no fading).
+Daemons on several machines on one LAN form one mesh. Any host on that LAN can join the group,
+so treat it as a test bench.
+
+`tools/vmesh.sh` runs the whole story in about five minutes. Four daemons form a chain, A (0 km),
+B (2 km), C (9 km) and D (11 km), with ~3.3 km of range. That makes two partitions. A sends D an
+encrypted DM and raises an SOS. B is a responder: it acks the SOS and carries both. It then walks
+north to 7.5 km (fake NMEA), meets C, and the DM and SOS reach D. B then walks back, so D's
+end-to-end ACK can reach A. That step is best effort and the script does not check it.
+A sniffer on the group checks that the DM text never went over the air in clear.
+
+```bash
+tools/vmesh.sh            # builds firmware/build-virt if needed; --keep keeps logs and keys
 ```
 
 ## Run on the Pi HAT
@@ -129,7 +176,9 @@ power at the default 10 dBm.
 Defaults: 914.875 MHz, SF9/BW125, sync word 0x24, **10 dBm SX1262 drive**. The E22P's power
 amplifier adds roughly 8–10 dB on top. Check DESIGN §12 before raising the power.
 
-**Verified so far:** the core builds and all 99 host tests pass. `ghostwaved` compiles and links
+**Verified so far:** the core builds and all 99 host tests pass, plus 32 for the virtual radio's channel
+model. `tools/vmesh.sh` passes on macOS: the DM and SOS cross the partition, and the DM text never
+goes over the air in clear. `ghostwaved` compiles and links
 against RadioLib 7.8.1 on macOS, using a stub `lgpio` (no lgpio for macOS). Key-file handling was run
 against that build: create with mode 600, reload, bad and missing files, and peers-file parsing.
 **Not verified yet:** running on real hardware, including the bench test above.
