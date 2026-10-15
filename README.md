@@ -34,6 +34,7 @@ firmware/core/         portable C++17 protocol core (packet codec + AEAD, router
 firmware/tests/        host tests, including multi-node runs over a simulated radio
 firmware/third_party/  Monocypher 4.0.2 (vendored, pinned; BSD-2 / CC0)
 firmware/pi/           ghostwaved: Raspberry Pi daemon for the Backcountry Signal HAT (RadioLib)
+firmware/mcu/          PlatformIO firmware for ESP32-S3 Heltec boards (Wireless Tracker V2, V3)
 ```
 
 ## Run the simulator
@@ -129,7 +130,107 @@ power at the default 10 dBm.
 Defaults: 914.875 MHz, SF9/BW125, sync word 0x24, **10 dBm SX1262 drive**. The E22P's power
 amplifier adds roughly 8–10 dB on top. Check DESIGN §12 before raising the power.
 
-**Verified so far:** the core builds and all 99 host tests pass. `ghostwaved` compiles and links
+**Verified so far:** the core builds and all host tests pass. `ghostwaved` compiles and links
 against RadioLib 7.8.1 on macOS, using a stub `lgpio` (no lgpio for macOS). Key-file handling was run
 against that build: create with mode 600, reload, bad and missing files, and peers-file parsing.
 **Not verified yet:** running on real hardware, including the bench test above.
+
+## Run on a Heltec board (ESP32-S3)
+
+`firmware/mcu/` is a PlatformIO project (Arduino framework, RadioLib 7.8.1). It runs the same router
+as `ghostwaved`. Supported boards:
+
+| env | Board | Position |
+|---|---|---|
+| `heltec_wireless_tracker_v2` | Heltec Wireless Tracker V2 (SX1262 + KCT8103L PA/LNA + UC6580 GPS) | GPS, or a stored position until the first fix |
+| `heltec_v3` | Heltec WiFi LoRa 32 V3 (SX1262, no GPS) | stored position (`setpos`) |
+
+The pin maps are in `firmware/mcu/src/board.h`. They come from Meshtastic's variant files, and each
+value cites its source. The nRF52 boards (T096, RAK4631, T1000-E) will be a separate port.
+
+### Flash
+
+1. Install PlatformIO Core: `pip install platformio` (CI uses 6.2.0).
+2. Plug the board in over USB. Connect the LoRa antenna first: transmitting without one can damage
+   the radio.
+3. Build and flash. This erases Meshtastic/MeshCore; you can reflash those later from their web
+   flashers.
+   ```bash
+   cd firmware/mcu && pio run -e heltec_wireless_tracker_v2 -t upload
+   ```
+   Use `-e heltec_v3` for the V3. If the upload cannot find the port, hold **BOOT**, tap **RST**,
+   release **BOOT**, and run the command again. On the Tracker, press **RST** after the upload.
+4. Open the console: `pio device monitor` (115200 baud). It echoes what you type and sends on Enter.
+
+On first boot the node creates a node ID (from the chip's MAC) and an X25519 identity key (from the
+hardware RNG), and stores them in NVS. Like `ghostwaved`, the board does not have an Ed25519 identity
+yet. It learns peer keys from IDENT (it prints `IDENT learned key for ...`) but does not send IDENT. They survive reflashing the app. `pio run -t erase` wipes them.
+
+### CLI
+
+The commands match `ghostwaved`:
+
+- `send <hex-id> <text>`, `known <hex-id> <lat> <lon>`, `pos`, `keys`, `peer <hex-id> <hex-pubkey>`.
+- `sos <text>`, `sosstop`, `sosack <hex-id>`.
+- `stats` prints the same counters as on the Pi. `status` adds the board, frequency, power, table use
+  against each cap, free and minimum free heap, and the key settings.
+
+These replace `ghostwaved`'s command-line options. They are saved in NVS:
+
+| Command | Effect |
+|---|---|
+| `peer <hex-id> <hex-pubkey>` | Adds a DM key now and saves it (up to 32 peers). |
+| `setpos <lat> <lon>` / `setpos clear` | Stored position. Used until a GPS fix arrives. Required on the V3. |
+| `psk <64 hex>` / `psk gen` / `psk off` | Channel key. `gen` makes one and prints it once, so you can paste it on the other nodes. `off` applies after a reboot. |
+| `power <dBm>` | Output at the antenna port. Default 20, capped at 22 (see below). Applies now. |
+| `freq <MHz>` | 902.0625–927.9375. Default 914.875. Applies after `reboot`. |
+| `requireenc on\|off` | Same as `--require-enc`. Applies after `reboot`. |
+| `responder on\|off` | Same as `--responder`. Applies after `reboot`. |
+| `reboot` | Restarts the node. |
+
+**Radio:** the "Trail" preset, the same as `ghostwaved`: SF9, BW125, CR4/5, 16-symbol preamble, sync
+word 0x24, CRC on. Channel-busy checks use CAD. **Power:** `power` sets the level at the antenna port.
+On the Tracker V2, the firmware subtracts the KCT8103L front end's gain before setting the SX1262. It
+uses Meshtastic's gain table, which we have not measured. Every board is capped at 22 dBm, the most a
+bare SX1262 can do, until a rule path is chosen (DESIGN §12). Only US 902–928 MHz is supported; the EU
+duty-cycle limiter is not ported yet.
+
+**Memory:** the router's tables are bounded. The store holds 64 messages and the SOS table 16
+originators. The duplicate-suppression table holds 512 entries, and the neighbor and location tables
+512 each. At boot the node prints its free heap next to a worst-case estimate for all tables full.
+That estimate is about 180 KB; it costs every stored frame at the full 128 bytes. The ESP32-S3 has
+320 KB of data RAM, and static data uses about 22 KB of it. The free heap at boot has not been measured
+on hardware yet. If it is too small, the boot line ends with `WARNING: may not fit`. `status` shows how
+full each table is and the minimum free heap seen since boot.
+
+### Two-board over-the-air test (encrypted DM + SOS)
+
+You need two flashed boards, A and B, a couple of metres apart, each with an antenna. At bench
+distance, turn the power down on both with `power 2`. Two V3s work, and so does one Tracker with one
+V3.
+
+1. **Give each a position.** On A, type `setpos 46.8700 -113.9900`. On B, type
+   `setpos 46.8710 -113.9900` (made up, 110 m north). A Tracker with a GPS fix can skip this.
+   Then type `pos` on each; it should print `fix ...`.
+2. **Swap public keys.** Type `keys` on each board. It prints `<id> <pubkey>`. On B, type
+   `peer ` followed by A's line. On A, type `peer ` followed by B's line. Each prints `ok`.
+3. **Refuse plaintext.** On both boards, type `requireenc on`, then `reboot`. The startup lines should
+   say `1 peer key, plaintext DATA refused`.
+4. **Encrypted DM.** On A, type `known <B-id> 46.8710 -113.9900`, then `send <B-id> hello over aead`.
+   - B should print `MSG from <A-id> ...: hello over aead`.
+   - A should print `DELIVERED to <B-id> ...` within a few seconds.
+   - `stats` on B should show `authfail 0`, and `tx`/`rx` counts on both.
+5. **SOS.** On A, type `sos bench test, ankle`.
+   - A prints `SOS on`.
+   - B prints `SOS from <A-id> seq 1 at 46.870000 -113.990000: bench test, ankle`.
+6. **SOS ack.** On B, type `sosack <A-id>`. A should print `SOSACK from <B-id> for seq 1`.
+7. **Stop the SOS.** On A, type `sosstop`. `stats` drops the `SOS-ACTIVE` flag.
+8. **Check memory.** Type `status` on both boards. Every table should be under its cap, and `min free`
+   should stay well above zero.
+
+To test against a Pi, run `ghostwaved` with its defaults (914.875 MHz). Swap keys the same way:
+paste the Pi's `keys` line into `peer` on the board, and the board's line into the Pi's peers file.
+
+**Verified so far (MCU):** both envs compile and link with `pio run`. **Not verified yet:** anything
+on hardware. That includes the pin maps, the FEM sequencing, GPS parsing from the UC6580, and the test
+above.

@@ -1,0 +1,12 @@
+{
+  "name": "monocypher",
+  "version": "4.0.2",
+  "description": "Vendored Monocypher (firmware/third_party/monocypher), built in place",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "srcDir": "../../../third_party/monocypher",
+    "includeDir": "../../../third_party/monocypher",
+    "srcFilter": ["+<monocypher.c>", "+<monocypher-ed25519.c>"]
+  }
+}
