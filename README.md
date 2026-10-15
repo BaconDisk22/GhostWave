@@ -163,7 +163,8 @@ value cites its source. The nRF52 boards (T096, RAK4631, T1000-E) will be a sepa
 4. Open the console: `pio device monitor` (115200 baud). It echoes what you type and sends on Enter.
 
 On first boot the node creates a node ID (from the chip's MAC) and an X25519 identity key (from the
-hardware RNG), and stores them in NVS. They survive reflashing the app. `pio run -t erase` wipes them.
+hardware RNG), and stores them in NVS. Like `ghostwaved`, the board does not have an Ed25519 identity
+yet. It learns peer keys from IDENT (it prints `IDENT learned key for ...`) but does not send IDENT. They survive reflashing the app. `pio run -t erase` wipes them.
 
 ### CLI
 

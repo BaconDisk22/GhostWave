@@ -7,6 +7,6 @@
   "build": {
     "srcDir": "../../../third_party/monocypher",
     "includeDir": "../../../third_party/monocypher",
-    "srcFilter": ["+<monocypher.c>"]
+    "srcFilter": ["+<monocypher.c>", "+<monocypher-ed25519.c>"]
   }
 }

@@ -125,6 +125,12 @@ class SerialApp : public gw::AppPort {
   void onSosAck(uint32_t responder, uint16_t seq) override {
     Serial.printf("SOSACK from %08x for seq %u\n", responder, seq);
   }
+  void onPeerIdent(uint32_t id, const std::string& name, bool firstSeen) override {
+    Serial.printf("IDENT %s %08x \"%s\"\n", firstSeen ? "learned key for" : "name change from", id, name.c_str());
+  }
+  void onKeyChange(uint32_t id, const uint8_t*, const std::string& name) override {
+    Serial.printf("WARNING: %08x (\"%s\") sent a different signed key; keeping the old one\n", id, name.c_str());
+  }
 };
 
 gw::mcu::Settings g_set;
