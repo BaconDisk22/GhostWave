@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: Host tests (firmware)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Configure
+        working-directory: firmware
+        run: cmake -S . -B build -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+      - name: Build
+        working-directory: firmware
+        run: cmake --build build --parallel
+      - name: Run tests
+        working-directory: firmware
+        run: ./build/ridgeline_tests
+
+  sim-smoke:
+    name: Sim smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Trail scenario, one seed
+        working-directory: sim
+        run: python3 ridgesim.py --scenario trail --proto ridgeline --seeds 1
