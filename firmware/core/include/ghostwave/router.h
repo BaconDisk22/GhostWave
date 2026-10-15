@@ -1,4 +1,4 @@
-// Ridgeline router: contention-based geographic forwarding, DTN custody store,
+// GhostWave router: contention-based geographic forwarding, DTN custody store,
 // spray-and-wait, airtime budget and CSMA (docs/DESIGN.md §5–6), the SOS lane
 // (§8) and DATA encryption (§9.1).
 //
@@ -14,10 +14,10 @@
 #include <utility>
 #include <vector>
 
-#include "ridgeline/packet.h"
-#include "ridgeline/util.h"
+#include "ghostwave/packet.h"
+#include "ghostwave/util.h"
 
-namespace rl {
+namespace gw {
 
 class RadioPort {
  public:
@@ -264,4 +264,4 @@ class Router {
   uint8_t sosBattery_ = 0xFF, sosAccuracy_ = 0xFF;
 };
 
-}  // namespace rl
+}  // namespace gw

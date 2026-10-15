@@ -1,6 +1,6 @@
-# Ridgeline — Protocol Design v0.1
+# GhostWave — Protocol Design v0.1
 
-> Working codename. A LoRa mesh built for people who move through places with no coverage:
+> A LoRa mesh built for people who move through places with no coverage:
 > hikers, SAR teams, hunters, overlanders, backcountry skiers.
 
 Status: **draft / prototype**. Everything here is open to change until v1.0; the packet
@@ -154,7 +154,7 @@ as they approach the area.
 
 ### 5.2 Contention-based geographic forwarding (GEO mode)
 
-Ridgeline uses *receiver-based* geographic forwarding. Senders don't pick a next hop from a
+GhostWave uses *receiver-based* geographic forwarding. Senders don't pick a next hop from a
 neighbor table that might be stale. They transmit **anycast** (`next_hop = 0`), and the
 receivers decide among themselves:
 
@@ -316,7 +316,7 @@ benefit**.
 
 - **DMs:** X25519 ECDH between the Ed25519-derived keys, then a KDF, then ChaCha20-Poly1305
   (RFC 8439, 16-byte tag replacing the 4-byte MIC). The KDF is
-  `BLAKE2b-256(shared || min(pubA, pubB) || max(pubA, pubB) || "ridgeline-dm-v1")`, not
+  `BLAKE2b-256(shared || min(pubA, pubB) || max(pubA, pubB) || "ghostwave-dm-v1")`, not
   HKDF, because the Monocypher core has BLAKE2b but no SHA-256/HKDF.
   The nonce is `src (4 LE) || msg_id (4 LE) || 0 (4)`.
   The associated data is the 19-byte header with byte 2, `prev_hop`, `next_hop`, the mode
@@ -360,15 +360,15 @@ for DMs once a session exists.
 - Framing: `0x94 0xC3 len_lo len_hi` + protobuf `ToRadio`/`FromRadio`. This is the same
   framing idea as Meshtastic, so existing serial tooling is easy to adapt, but the schema
   is ours.
-- Published as `proto/ridgeline.proto` with its own version number.
+- Published as `proto/ghostwave.proto` with its own version number.
 
 ---
 
 ## 11. Bridge (v1.x)
 
 A Pi with two radios (or one radio + MQTT) translates:
-- Ridgeline DATA ↔ Meshtastic TEXT_MESSAGE_APP on a configured channel
-- Ridgeline DATA ↔ MeshCore channel/DM via a companion-protocol link
+- GhostWave DATA ↔ Meshtastic TEXT_MESSAGE_APP on a configured channel
+- GhostWave DATA ↔ MeshCore channel/DM via a companion-protocol link
 
 Identity mapping is explicit (the user pairs contacts). The bridge never forwards SOS
 *into* other meshes without user opt-in.
@@ -405,11 +405,11 @@ Identity mapping is explicit (the user pairs contacts). The bridge never forward
 7. SOS cost: in backcountry with 6 concurrent SOS events the lane spends ~3× flood3's SOS
    airtime, because every node holds and re-offers every SOS. Its reach to fixed nodes beats flood3 in the
    tail but not flood7 (§14). Worth trying: coarser (per-15-min) Bloom keys for updates,
-   and checking whether Ridgeline's higher channel load causes the flood7 gap.
+   and checking whether GhostWave's higher channel load causes the flood7 gap.
 
 ---
 
-## 14. Simulation results (sim/ridgesim.py, 3 seeds each)
+## 14. Simulation results (sim/ghostsim.py, 3 seeds each)
 
 Same mobility, traffic and radio model for every protocol: SF9/BW125, path-loss exponent 3.5,
 5 dB fading, capture, half-duplex, CAD. Baselines are *simplified models* of Meshtastic
@@ -419,20 +419,20 @@ Same mobility, traffic and radio model for every protocol: SF9/BW125, path-loss 
 |---|---|---|---|---|---|
 | **trail** (8 km, 50 nodes) | flood (hop 3) | 99.9 % | 99.9 % | 1.0 s | 21.9 s |
 | | path-learning | 100 % | 100 % | 0.8 s | **5.4 s** |
-| | **Ridgeline** | 100 % | 99.8 % | 1.0 s | 5.7 s |
+| | **GhostWave** | 100 % | 99.8 % | 1.0 s | 5.7 s |
 | **backcountry** (25 km, 40 nodes) | flood (hop 3) | 45.9 % | 44.3 % | 1.8 s | 25.5 s |
 | | flood (hop 7) | 62.9 % | 60.2 % | 2.5 s | 30.2 s |
 | | path-learning | 21.0 % | 21.0 % | 0.9 s | 7.8 s |
-| | **Ridgeline** | **98.7 %** | 54.4 % | 26 s | 25.7 s |
+| | **GhostWave** | **98.7 %** | 54.4 % | 26 s | 25.7 s |
 | **busy** (5 km, 120 nodes) | flood (hop 3) | 90.9 % | 11.4 % | 419 s | 22.0 s |
 | | path-learning | 95.7 % | 50.5 % | 54 s | 10.1 s |
-| | **Ridgeline** | **100 %** | **99.7 %** | **1.4 s** | **4.2 s** |
+| | **GhostWave** | **100 %** | **99.7 %** | **1.4 s** | **4.2 s** |
 
 Ablations (which pillar does the work):
 
 | Variant | trail air/msg | backcountry delivered | busy ≤ 60 s |
 |---|---|---|---|
-| Ridgeline | 5.7 s | 98.7 % | 99.7 % |
+| GhostWave | 5.7 s | 98.7 % | 99.7 % |
 | without DTN | 5.7 s | **49.1 %** | 99.9 % |
 | without forwarding area | 6.8 s | 98.3 % (≤60 s: 64.5 %) | **85.2 %** |
 | without airtime budget | 5.7 s | 97.9 % | 99.9 % |
@@ -444,7 +444,7 @@ Ablations (which pillar does the work):
 - **Duplicate-free geographic forwarding is the busy-mesh win.** It uses 5× less airtime than flooding
   and 2.4× less than path-learning, with sub-2 s latency, while flooding collapses.
 - In a well-connected mesh with good fixed repeaters, **MeshCore-style path-learning is
-  already excellent**. Ridgeline matches it there. It doesn't beat it.
+  already excellent**. GhostWave matches it there. It doesn't beat it.
 - GPS slots were rejected (§6.0). The airtime budget is unproven (§6.1).
 
 ### SOS reach (`--sos`, backcountry, 10 seeds × 6 SOS events)
@@ -457,7 +457,7 @@ flood. Results in `sim/results/backcountry.sos.txt`.
 |---|---|---|---|---|---|---|
 | flood (hop 3) | 100 % | 83 % | 1 s | 301 s | 3001 s | 455 s |
 | flood (hop 7) | 100 % | 92 % | 1 s | 5 s | 2101 s | 769 s |
-| **Ridgeline** | 100 % | 87 % | 1 s | 131 s | **1501 s** | 1480 s |
+| **GhostWave** | 100 % | 87 % | 1 s | 131 s | **1501 s** | 1480 s |
 
 Most SOS events reach a fixed node within seconds whatever the protocol. Against flood3, the epidemic store
 halves the p90 and the worst case. flood7's wider instant flood still wins the p90 at half the

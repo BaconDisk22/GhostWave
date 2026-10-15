@@ -5,9 +5,9 @@
 #include <cstdint>
 #include <string>
 
-#include "ridgeline/packet.h"
+#include "ghostwave/packet.h"
 
-namespace rl {
+namespace gw {
 
 // Great-circle distance in metres.
 double distanceM(const Position& a, const Position& b);
@@ -46,4 +46,4 @@ class Rng {
 // valid fix with a correct checksum.
 bool parseNmea(const std::string& line, Position& out);
 
-}  // namespace rl
+}  // namespace gw

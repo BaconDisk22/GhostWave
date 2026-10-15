@@ -1,0 +1,1 @@
+backcountry  ghostwave            pdr=0.987 pdr60=0.544 lat_med=   26.2s air/msg= 25.73s util=0.551 tx=13307 lost=7299

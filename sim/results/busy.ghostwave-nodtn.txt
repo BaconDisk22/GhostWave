@@ -1,0 +1,5 @@
+busy         ghostwave-nodtn      pdr=1.000 pdr60=0.999 lat_med=    1.4s air/msg=  3.99s util=0.529 tx=15060 lost=367089
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| busy | ghostwave-nodtn | 100.0 % | 99.9 % | 1.4 s | 3.99 s | 52.9 % |

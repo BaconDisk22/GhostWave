@@ -21,7 +21,7 @@ jobs:
         run: cmake --build build --parallel
       - name: Run tests
         working-directory: firmware
-        run: ./build/ridgeline_tests
+        run: ./build/ghostwave_tests
 
   sim-smoke:
     name: Sim smoke test
@@ -33,4 +33,4 @@ jobs:
           python-version: "3.12"
       - name: Trail scenario, one seed
         working-directory: sim
-        run: python3 ridgesim.py --scenario trail --proto ridgeline --seeds 1
+        run: python3 ghostsim.py --scenario trail --proto ghostwave --seeds 1

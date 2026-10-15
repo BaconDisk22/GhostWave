@@ -1,10 +1,10 @@
-#include "ridgeline/util.h"
+#include "ghostwave/util.h"
 
 #include <cmath>
 #include <cstdlib>
 #include <vector>
 
-namespace rl {
+namespace gw {
 
 double distanceM(const Position& a, const Position& b) {
   constexpr double kR = 6371000.0, kD = M_PI / 180.0;
@@ -77,4 +77,4 @@ bool parseNmea(const std::string& raw, Position& out) {
   return true;
 }
 
-}  // namespace rl
+}  // namespace gw

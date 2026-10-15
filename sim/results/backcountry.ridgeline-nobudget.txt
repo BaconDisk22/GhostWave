@@ -1,5 +1,0 @@
-backcountry  ridgeline-nobudget   pdr=0.979 pdr60=0.537 lat_med=   40.4s air/msg= 25.52s util=0.542 tx=13063 lost=7416
-
-| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
-|---|---|---|---|---|---|---|
-| backcountry | ridgeline-nobudget | 97.9 % | 53.7 % | 40.4 s | 25.52 s | 54.2 % |

@@ -1,0 +1,5 @@
+backcountry  ghostwave-nodtn      pdr=0.491 pdr60=0.491 lat_med=    7.7s air/msg= 16.43s util=0.174 tx=4390 lost=855
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| backcountry | ghostwave-nodtn | 49.1 % | 49.1 % | 7.7 s | 16.43 s | 17.4 % |

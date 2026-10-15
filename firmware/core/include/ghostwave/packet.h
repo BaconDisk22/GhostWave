@@ -1,4 +1,4 @@
-// Ridgeline wire format (docs/DESIGN.md §4).
+// GhostWave wire format (docs/DESIGN.md §4).
 #pragma once
 
 #include <cstddef>
@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace rl {
+namespace gw {
 
 constexpr uint8_t kVersion = 1;
 constexpr uint32_t kBroadcast = 0xFFFFFFFFu;
@@ -88,4 +88,4 @@ uint32_t ageDecode(uint8_t code);   // seconds; UINT32_MAX for unknown
 
 uint32_t crc32c(const uint8_t* data, size_t len, uint32_t crc = 0);
 
-}  // namespace rl
+}  // namespace gw
