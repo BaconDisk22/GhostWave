@@ -1,7 +1,7 @@
 {
-  "name": "ridgeline_core",
+  "name": "ghostwave_core",
   "version": "0.1.0",
-  "description": "Ridgeline portable core (firmware/core), built in place",
+  "description": "GhostWave portable core (firmware/core), built in place",
   "frameworks": "*",
   "platforms": "*",
   "dependencies": [{ "name": "monocypher" }],

@@ -1,0 +1,5 @@
+backcountry  ghostwave-noarea     pdr=0.983 pdr60=0.645 lat_med=   15.2s air/msg= 25.03s util=0.533 tx=13116 lost=7483
+
+| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
+|---|---|---|---|---|---|---|
+| backcountry | ghostwave-noarea | 98.3 % | 64.5 % | 15.2 s | 25.03 s | 53.3 % |

@@ -1,12 +1,12 @@
-#include "ridgeline/router.h"
+#include "ghostwave/router.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 
-#include "ridgeline/crypto.h"
+#include "ghostwave/crypto.h"
 
-namespace rl {
+namespace gw {
 namespace {
 
 constexpr uint64_t kSeenLifetimeMs = 3600 * 1000;
@@ -21,7 +21,10 @@ constexpr size_t kBeaconFixed = 13;   // flags, velocity, util, store count, blo
 constexpr size_t kBloomOff = 5;
 constexpr uint8_t kBeaconHasGps = 0x01;
 constexpr uint8_t kBeaconSos = 0x10;  // sender holds at least one SOS
-constexpr size_t kPeerCapacity = 64;
+constexpr uint64_t kIdentAskGapMs = 10 * 60 * 1000;   // ask one neighbor at most this often
+constexpr uint64_t kIdentReplyGapMs = 15 * 1000;      // our IDENTs are at least this far apart
+constexpr size_t kIdentWantCapacity = 8;
+constexpr size_t kIdentAskedCapacity = 32;
 constexpr size_t kSosHeader = 4;      // seq (2), accuracy, battery
 constexpr size_t kOfferedCapacity = 32;
 constexpr uint64_t kSosReofferMs = 15 * 60 * 1000;
@@ -67,14 +70,26 @@ Router::Router(const Config& cfg, RadioPort& radio, AppPort& app)
 Router::~Router() {
   wipe(idKey_.data(), idKey_.size());
   wipe(chanKey_.data(), chanKey_.size());
-  for (auto& [id, k] : dmKeys_) wipe(k.data(), k.size());
+  for (auto& [id, pr] : peers_) wipe(pr.dm.data(), pr.dm.size());
 }
 
 // -------------------------------------------------------------------- keys --
 
+// A new identity drops any IDENT we were sending (it would advertise the old
+// key) and re-derives the DM keys of peers already held.
 void Router::setIdentityKey(const uint8_t secret[32]) {
   std::memcpy(idKey_.data(), secret, 32);
   haveIdKey_ = true;
+  haveSigKey_ = false;
+  identBody_.clear();
+  for (auto it = peers_.begin(); it != peers_.end();) {
+    if (dmKey(idKey_.data(), it->second.xPub.data(), it->second.dm.data())) {
+      ++it;
+    } else {
+      wipe(it->second.dm.data(), it->second.dm.size());
+      it = peers_.erase(it);
+    }
+  }
 }
 
 void Router::setChannelKey(const uint8_t key[32]) {
@@ -82,18 +97,56 @@ void Router::setChannelKey(const uint8_t key[32]) {
   haveChanKey_ = true;
 }
 
-bool Router::addPeerKey(uint32_t id, const uint8_t pub[32]) {
-  if (!haveIdKey_ || (dmKeys_.size() >= kPeerCapacity && !dmKeys_.count(id))) return false;
-  std::array<uint8_t, 32> k;
-  if (!dmKey(idKey_.data(), pub, k.data())) return false;
-  dmKeys_[id] = k;
-  wipe(k.data(), k.size());
+bool Router::setSigningKey(const uint8_t seed[32], const std::string& name) {
+  uint8_t pub[32], x[32];
+  std::vector<uint8_t> body;
+  ed25519Public(seed, pub);
+  if (nodeIdOf(pub) != cfg_.nodeId || !nodeIdUsable(cfg_.nodeId) || !identBody(seed, name, body))
+    return false;
+  ed25519SecretToX25519(seed, x);
+  setIdentityKey(x);
+  wipe(x, sizeof x);
+  identBody_ = std::move(body);
+  haveSigKey_ = true;
+  return true;
+}
+
+bool Router::addPeerKey(uint32_t id, const uint8_t pub[32]) { return storePeer(id, pub, true, 0); }
+
+// Pinned keys replace whatever we hold; learned ones only fill a free slot (or
+// evict the oldest learned key). The caller does the TOFU comparison.
+bool Router::storePeer(uint32_t id, const uint8_t pub[32], bool pinned, uint64_t now) {
+  Peer pr{};
+  if (!haveIdKey_ || !dmKey(idKey_.data(), pub, pr.dm.data())) return false;
+  if (!peers_.count(id) && peers_.size() >= cfg_.peerCapacity) {
+    auto victim = peers_.end();
+    for (auto it = peers_.begin(); it != peers_.end(); ++it)
+      if (!it->second.pinned && (victim == peers_.end() || it->second.learnedMs < victim->second.learnedMs))
+        victim = it;
+    if (victim == peers_.end()) {
+      wipe(pr.dm.data(), pr.dm.size());
+      return false;
+    }
+    wipe(victim->second.dm.data(), victim->second.dm.size());
+    peers_.erase(victim);
+  }
+  std::memcpy(pr.xPub.data(), pub, 32);
+  pr.pinned = pinned;
+  pr.learnedMs = now;
+  auto old = peers_.find(id);
+  if (old != peers_.end()) {
+    pr.name = old->second.name;
+    wipe(old->second.dm.data(), old->second.dm.size());
+  }
+  peers_[id] = pr;
+  wipe(pr.dm.data(), pr.dm.size());
+  identWant_.erase(id);
   return true;
 }
 
 bool Router::openData(const Packet& p, std::vector<uint8_t>& plain) {
-  auto dm = dmKeys_.find(p.src);
-  if (dm != dmKeys_.end() && aeadOpen(p, dm->second.data(), plain)) return true;
+  auto pr = peers_.find(p.src);
+  if (pr != peers_.end() && aeadOpen(p, pr->second.dm.data(), plain)) return true;
   return haveChanKey_ && aeadOpen(p, chanKey_.data(), plain);
 }
 
@@ -121,9 +174,9 @@ uint32_t Router::send(uint32_t dst, const std::vector<uint8_t>& payload, uint64_
     p.srcAge = 0;
   }
   // seal now: every field the AEAD covers is final from here on
-  auto dm = dmKeys_.find(dst);
-  if (dm != dmKeys_.end()) {
-    if (!aeadSeal(p, dm->second.data())) return 0;
+  auto pr = peers_.find(dst);
+  if (pr != peers_.end()) {
+    if (!aeadSeal(p, pr->second.dm.data())) return 0;
   } else if (haveChanKey_) {
     if (!aeadSeal(p, chanKey_.data())) return 0;
   }
@@ -172,7 +225,8 @@ void Router::onReceive(const uint8_t* buf, size_t len, float rssi, uint64_t now)
     case PType::Data: onData(p, rssi, now); break;
     case PType::Sos: onSos(p, now); break;
     case PType::SosAck: onSosAck(p, now); break;
-    default: break;   // IDENT: not implemented yet
+    case PType::Ident: onIdent(p, now); break;
+    default: break;
   }
 }
 
@@ -243,6 +297,7 @@ void Router::tick(uint64_t now) {
     if (havePos_ && (!beaconed_ || now - lastBeaconT_ >= kBeaconReplyMinMs)) sendBeacon(now);
   }
   sosTick(now);
+  identTick(now);
 
   for (auto it = store_.begin(); it != store_.end();)
     it = (now - it->second.created > cfg_.storeTtlMs) ? store_.erase(it) : std::next(it);
@@ -560,6 +615,7 @@ void Router::onBeacon(const Packet& p, uint64_t now) {
   }
   nb_[p.src] = {p.fwdPos, now};
   learn(p.src, p.fwdPos, now);
+  wantIdent(p.src, now);
   if (p.payload.size() >= kBeaconFixed) {
     for (size_t off = kBeaconFixed; off + kGossipSize <= p.payload.size(); off += kGossipSize) {
       const uint8_t* g = p.payload.data() + off;
@@ -957,4 +1013,109 @@ void Router::sosTick(uint64_t now) {
   }
 }
 
-}  // namespace rl
+// ------------------------------------------------------------------- IDENT --
+
+bool Router::requestIdent(uint32_t id, uint64_t now) {
+  if (!haveSigKey_ || id == cfg_.nodeId || id == kBroadcast) return false;
+  askIdent(id, now);
+  return true;
+}
+
+void Router::askIdent(uint32_t id, uint64_t now) {
+  if (identAsked_.size() >= kIdentAskedCapacity && !identAsked_.count(id)) {
+    auto oldest = std::min_element(identAsked_.begin(), identAsked_.end(),
+                                   [](auto& a, auto& b) { return a.second < b.second; });
+    identAsked_.erase(oldest);
+  }
+  identAsked_[id] = now;
+  sendIdent(id, now);
+}
+
+// A neighbor we hold no key for: ask for its IDENT after a short jitter. If
+// its broadcast (answering someone else) arrives first, the ask is dropped.
+void Router::wantIdent(uint32_t id, uint64_t now) {
+  if (!haveSigKey_ || peers_.count(id) || identWant_.count(id)) return;
+  if (identWant_.size() >= kIdentWantCapacity) return;
+  auto a = identAsked_.find(id);
+  if (a != identAsked_.end() && now - a->second < kIdentAskGapMs) return;
+  identWant_[id] = now + rng_.range(500, 5000);
+}
+
+// dst = broadcast announces us; dst = a node asks it for its IDENT (and
+// announces us to everyone in range, since the body is the same).
+void Router::sendIdent(uint32_t dst, uint64_t now) {
+  Packet p;
+  p.type = PType::Ident;
+  p.mode = Mode::Unicast;   // 1-hop, never forwarded
+  p.src = cfg_.nodeId;
+  p.dst = dst;
+  p.msgId = rng_.next() | 1;
+  p.hopsLeft = 0;
+  p.prevHop = me16();
+  p.nextHop = dst == kBroadcast ? 0 : shortId(dst);
+  p.payload = identBody_;
+  enqueue(p, true, now);
+  lastIdentT_ = now;
+  identSent_ = true;
+  ++stats_.identTx;
+}
+
+void Router::onIdent(const Packet& p, uint64_t now) {
+  if (p.src == cfg_.nodeId) return;
+  uint8_t edPub[32];
+  std::string name;
+  if (p.encrypted || !identCheck(p.payload, p.src, edPub, name)) {
+    ++stats_.identBad;   // forged signature or a key that does not hash to src
+    return;
+  }
+  ++stats_.identRx;
+  if (p.dst == cfg_.nodeId && haveSigKey_ && !identReplyAt_) {
+    // answer with a broadcast: every neighbor that lacks our key learns it too
+    uint64_t at = now + rng_.range(100, 1000);
+    if (identSent_) at = std::max(at, lastIdentT_ + kIdentReplyGapMs);
+    identReplyAt_ = at;
+  }
+  uint8_t x[32];
+  ed25519ToX25519(edPub, x);
+  auto it = peers_.find(p.src);
+  if (it == peers_.end()) {
+    if (storePeer(p.src, x, false, now)) {   // trust on first use
+      peers_[p.src].name = name;
+      app_.onPeerIdent(p.src, name, true);
+    }
+  } else if (std::memcmp(it->second.xPub.data(), x, 32) != 0) {
+    ++stats_.keyChanges;   // keep the key we have; the host decides
+    app_.onKeyChange(p.src, edPub, name);
+  } else if (it->second.name != name) {
+    it->second.name = name;   // signed by the key we already trust
+    app_.onPeerIdent(p.src, name, false);
+  }
+}
+
+void Router::identTick(uint64_t now) {
+  if (!haveSigKey_) return;
+  for (auto it = identWant_.begin(); it != identWant_.end();) {
+    if (it->second > now) {
+      ++it;
+      continue;
+    }
+    uint32_t id = it->first;
+    it = identWant_.erase(it);
+    if (!peers_.count(id)) askIdent(id, now);
+  }
+  if (identReplyAt_ && now >= identReplyAt_) {
+    identReplyAt_ = 0;
+    sendIdent(kBroadcast, now);
+  }
+  if (cfg_.identIntervalMs == 0) return;
+  if (nextIdentAt_ == 0) {
+    nextIdentAt_ = now + rng_.range(1000, 15000);   // announce soon after start
+  } else if (now >= nextIdentAt_) {
+    if (now - lastIdentT_ >= kIdentReplyGapMs || !identSent_) sendIdent(kBroadcast, now);
+    double scale = std::max(1.0, util_ / cfg_.utilTarget);
+    nextIdentAt_ = now + static_cast<uint64_t>(cfg_.identIntervalMs * scale) +
+                   rng_.range(0, cfg_.identIntervalMs / 10 + 1);
+  }
+}
+
+}  // namespace gw

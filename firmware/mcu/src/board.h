@@ -5,11 +5,11 @@
 
 #include <stdint.h>
 
-#if defined(RL_BOARD_TRACKER_V2)
+#if defined(GW_BOARD_TRACKER_V2)
 // Source: variants/esp32s3/heltec_wireless_tracker_v2/variant.h
 //         (+ pins_arduino.h there for SCK/MISO/MOSI/SS, src/configuration.h for
 //          the PA gain curve, src/mesh/LoRaFEMInterface.cpp for FEM sequencing)
-#define RL_BOARD_NAME "heltec_wireless_tracker_v2"
+#define GW_BOARD_NAME "heltec_wireless_tracker_v2"
 constexpr int kPinLoraSck = 9;
 constexpr int kPinLoraMiso = 11;
 constexpr int kPinLoraMosi = 10;
@@ -22,7 +22,7 @@ constexpr float kTcxoVolts = 1.8f;  // SX126X_DIO3_TCXO_VOLTAGE
 // KCT8103L FEM's CPS pin.
 
 // KCT8103L front end (PA + LNA). TX: CSD=1 CTX=1, RX with LNA: CSD=1 CTX=0.
-#define RL_HAS_KCT8103L 1
+#define GW_HAS_KCT8103L 1
 constexpr int kPinFemPower = 7;     // LORA_PA_POWER, FEM LDO enable, HIGH = on
 constexpr int kPinFemCsd = 4;       // LORA_KCT8103L_PA_CSD, HIGH = chip on
 constexpr int kPinFemCtx = 5;       // LORA_KCT8103L_PA_CTX, HIGH = TX / RX bypass, LOW = RX LNA
@@ -31,7 +31,7 @@ constexpr int kPinFemCtx = 5;       // LORA_KCT8103L_PA_CTX, HIGH = TX / RX bypa
 constexpr uint8_t kPaGainDb[22] = {14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14,
                                    14, 13, 13, 13, 12, 12, 11, 10, 9,  8,  7};
 
-#define RL_HAS_GPS 1
+#define GW_HAS_GPS 1
 constexpr int kPinVext = 3;         // VEXT_ENABLE: powers GPS, GPS LNA and TFT
 constexpr bool kVextOn = true;      // VEXT_ON_VALUE HIGH
 constexpr int kPinGpsRx = 33;       // GPS_RX_PIN (ESP32 RX <- GPS TX)
@@ -39,9 +39,9 @@ constexpr int kPinGpsTx = 34;       // GPS_TX_PIN (ESP32 TX -> GPS RX)
 constexpr int kPinGpsReset = 35;    // PIN_GPS_RESET, GPS_RESET_MODE LOW = in reset
 constexpr uint32_t kGpsBaud = 115200;   // GPS_BAUDRATE, UC6580
 
-#elif defined(RL_BOARD_HELTEC_V3)
+#elif defined(GW_BOARD_HELTEC_V3)
 // Source: variants/esp32s3/heltec_v3/variant.h
-#define RL_BOARD_NAME "heltec_v3"
+#define GW_BOARD_NAME "heltec_v3"
 constexpr int kPinLoraSck = 9;
 constexpr int kPinLoraMiso = 11;
 constexpr int kPinLoraMosi = 10;
@@ -51,8 +51,8 @@ constexpr int kPinLoraBusy = 13;
 constexpr int kPinLoraRst = 12;
 constexpr float kTcxoVolts = 1.8f;
 // DIO2 drives the RF switch. No external PA: output = SX1262 drive.
-#define RL_HAS_KCT8103L 0
-#define RL_HAS_GPS 0
+#define GW_HAS_KCT8103L 0
+#define GW_HAS_GPS 0
 // VEXT_ENABLE is `Vext` from the board's pins_arduino.h (GPIO 36 in
 // platform-espressif32's heltec_wifi_lora_32_V3 variant), active LOW
 // (Meshtastic's default VEXT_ON_VALUE). The variant comment says it powers
@@ -62,7 +62,7 @@ constexpr int kPinVext = 36;
 constexpr bool kVextOn = false;     // LOW = on
 
 #else
-#error "Define RL_BOARD_TRACKER_V2 or RL_BOARD_HELTEC_V3 (see platformio.ini)"
+#error "Define GW_BOARD_TRACKER_V2 or GW_BOARD_HELTEC_V3 (see platformio.ini)"
 #endif
 
 // Conducted output limit at the antenna port. DESIGN §12 leaves the US rule

@@ -1,1 +1,0 @@
-busy         ridgeline            pdr=1.000 pdr60=0.997 lat_med=    1.4s air/msg=  4.19s util=0.555 tx=16245 lost=456666

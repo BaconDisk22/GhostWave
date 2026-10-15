@@ -1,16 +1,17 @@
-// Ridgeline node firmware for ESP32-S3 + SX1262 dev boards (Heltec Wireless
-// Tracker V2, Heltec V3). Same core and the same line commands as ridgelined
+// GhostWave node firmware for ESP32-S3 + SX1262 dev boards (Heltec Wireless
+// Tracker V2, Heltec V3). Same core and the same line commands as ghostwaved
 // (firmware/pi), over USB serial at 115200 baud. Type `help`.
 //
-// Settings, the node ID, the X25519 identity key, the optional channel key and
-// peer keys live in NVS (Preferences namespace "ridgeline"). NVS is not
-// encrypted: anyone holding the board can read the keys out of flash.
+// Identity: an Ed25519 seed in NVS; the node ID is derived from its public key
+// (DESIGN §3) and peers learn our key from signed IDENT broadcasts (§4.5).
+// The seed, the optional channel key, pinned peer keys and settings live in NVS
+// (Preferences namespace "ghostwave"). NVS is not encrypted: anyone holding
+// the board can read the keys out of flash.
 #include <Arduino.h>
 #include <Preferences.h>
 #include <RadioLib.h>
 #include <SPI.h>
 #include <esp_heap_caps.h>
-#include <esp_mac.h>
 #include <esp_random.h>
 #include <esp_timer.h>
 
@@ -21,13 +22,13 @@
 
 #include "board.h"
 #include "bootloader_random.h"
-#include "ridgeline/crypto.h"
-#include "ridgeline/router.h"
+#include "ghostwave/crypto.h"
+#include "ghostwave/router.h"
 
 namespace {
 
 // "Trail" preset (DESIGN §2): SF9 / BW125 / CR4/5 / 16-symbol preamble.
-// Frequency and sync word match ridgelined so a Pi node and a dev board hear
+// Frequency and sync word match ghostwaved so a Pi node and a dev board hear
 // each other: 914.875 MHz sits inside the US 915 band, clear of the
 // Meshtastic/MeshCore defaults, and 0x24 keeps other meshes' frames out.
 constexpr float kDefaultFreqMHz = 914.875f;
@@ -38,16 +39,17 @@ constexpr size_t kLineMax = 300;        // CLI line
 constexpr size_t kNmeaMax = 120;
 constexpr uint32_t kLowHeapBytes = 24 * 1024;
 
-using Key32 = std::array<uint8_t, rl::kKeySize>;
+using Key32 = std::array<uint8_t, gw::kKeySize>;
 
 struct PeerRec {
   uint32_t id;
-  uint8_t pub[rl::kKeySize];
+  uint8_t pub[gw::kKeySize];
 };
 
 struct Settings {
   uint32_t id = 0;
-  Key32 secret{};
+  Key32 seed{};       // Ed25519 identity seed
+  std::string name;   // IDENT name, <= kIdentNameMax bytes
   bool havePsk = false;
   Key32 psk{};
   bool fixedPos = false;
@@ -60,7 +62,8 @@ struct Settings {
 
 Preferences g_prefs;
 Settings g_set;
-Key32 g_pub{};
+Key32 g_pub{};     // X25519 public key (what `keys` prints)
+Key32 g_edPub{};   // Ed25519 identity key
 
 SPIClass g_spi(FSPI);
 SX1262 g_radio = new Module(kPinLoraCs, kPinLoraDio1, kPinLoraRst, kPinLoraBusy, g_spi);
@@ -68,10 +71,10 @@ volatile bool g_rxFlag = false;
 volatile bool g_radioOp = false;   // CAD or TX in progress: DIO1 is not "packet received"
 int8_t g_driveDbm = 0;
 
-rl::Router* g_router = nullptr;
-rl::Position g_pos;
+gw::Router* g_router = nullptr;
+gw::Position g_pos;
 const char* g_posSrc = "none";
-#if RL_HAS_GPS
+#if GW_HAS_GPS
 uint32_t g_nmeaOk = 0, g_fixes = 0;
 #endif
 bool g_lowHeapWarned = false;
@@ -111,7 +114,7 @@ bool parseId(const std::string& s, uint32_t& id) {
   if (s.empty() || s.size() > 8) return false;
   char* end = nullptr;
   id = static_cast<uint32_t>(std::strtoul(s.c_str(), &end, 16));
-  return *end == '\0' && id != 0 && id != rl::kBroadcast;
+  return *end == '\0' && id != 0 && id != gw::kBroadcast;
 }
 
 // Splits off the next space-separated word; `rest` keeps the remainder.
@@ -142,20 +145,20 @@ void savePeers() {
 }
 
 void loadSettings() {
-  g_prefs.begin("ridgeline", false);
-  g_set.id = g_prefs.getUInt("id", 0);
-  if (!g_set.id) {
-    uint8_t mac[6];
-    esp_efuse_mac_get_default(mac);
-    g_set.id = rl::crc32c(mac, sizeof mac);
-    if (!g_set.id || g_set.id == rl::kBroadcast) g_set.id = 0x52494447;
-    g_prefs.putUInt("id", g_set.id);
-  }
-  if (g_prefs.getBytes("sk", g_set.secret.data(), g_set.secret.size()) != g_set.secret.size()) {
-    secureRandom(g_set.secret.data(), g_set.secret.size());
-    g_prefs.putBytes("sk", g_set.secret.data(), g_set.secret.size());
+  g_prefs.begin("ghostwave", false);
+  if (g_prefs.getBytes("seed", g_set.seed.data(), g_set.seed.size()) != g_set.seed.size()) {
+    // the node ID is a hash of the key: redraw the rare key whose ID is unusable
+    do {
+      secureRandom(g_set.seed.data(), g_set.seed.size());
+      gw::ed25519Public(g_set.seed.data(), g_edPub.data());
+    } while (!gw::nodeIdUsable(gw::nodeIdOf(g_edPub.data())));
+    g_prefs.putBytes("seed", g_set.seed.data(), g_set.seed.size());
     Serial.println("generated new identity key");
   }
+  gw::ed25519Public(g_set.seed.data(), g_edPub.data());
+  gw::ed25519ToX25519(g_edPub.data(), g_pub.data());
+  g_set.id = gw::nodeIdOf(g_edPub.data());
+  g_set.name = g_prefs.getString("name", "").c_str();
   g_set.havePsk = g_prefs.getBytes("psk", g_set.psk.data(), g_set.psk.size()) == g_set.psk.size();
   g_set.fixedPos = g_prefs.getBool("fix", false);
   g_set.lat = g_prefs.getDouble("lat", 0);
@@ -175,7 +178,7 @@ void loadSettings() {
 // Highest SX1262 drive whose output (drive + FEM gain) stays within `out` dBm.
 int8_t driveFor(int out) {
   if (out > kMaxOutputDbm) out = kMaxOutputDbm;
-#if RL_HAS_KCT8103L
+#if GW_HAS_KCT8103L
   if (out - kPaGainDb[0] < 0) return static_cast<int8_t>(out - kPaGainDb[0] < -9 ? -9 : out - kPaGainDb[0]);
   int best = 0;
   for (int d = 0; d < 22; ++d)
@@ -187,7 +190,7 @@ int8_t driveFor(int out) {
 }
 
 int outputFor(int8_t drive) {
-#if RL_HAS_KCT8103L
+#if GW_HAS_KCT8103L
   return drive + kPaGainDb[drive < 0 ? 0 : drive];
 #else
   return drive;
@@ -199,14 +202,14 @@ void IRAM_ATTR onDio1() {
 }
 
 void femTx(bool tx) {
-#if RL_HAS_KCT8103L
+#if GW_HAS_KCT8103L
   digitalWrite(kPinFemCtx, tx ? HIGH : LOW);
 #else
   (void)tx;
 #endif
 }
 
-class McuRadio : public rl::RadioPort {
+class McuRadio : public gw::RadioPort {
  public:
   bool channelBusy() override {
     if (g_rxFlag) return true;   // a packet is waiting
@@ -231,7 +234,7 @@ class McuRadio : public rl::RadioPort {
 };
 
 bool radioBegin() {
-#if RL_HAS_KCT8103L
+#if GW_HAS_KCT8103L
   // FEM bring-up order from LoRaFEMInterface::init (USE_KCT8103L_PA)
   pinMode(kPinFemPower, OUTPUT);
   digitalWrite(kPinFemPower, HIGH);
@@ -258,7 +261,7 @@ bool radioBegin() {
 
 // -------------------------------------------------------------------- app --
 
-class SerialApp : public rl::AppPort {
+class SerialApp : public gw::AppPort {
  public:
   void onMessage(uint32_t src, uint32_t msgId, const std::vector<uint8_t>& p) override {
     Serial.printf("MSG from %08lx id %08lx: %.*s\n", (unsigned long)src, (unsigned long)msgId,
@@ -267,7 +270,7 @@ class SerialApp : public rl::AppPort {
   void onDelivered(uint32_t dst, uint32_t msgId) override {
     Serial.printf("DELIVERED to %08lx id %08lx\n", (unsigned long)dst, (unsigned long)msgId);
   }
-  void onSos(const rl::SosInfo& s) override {
+  void onSos(const gw::SosInfo& s) override {
     Serial.printf("SOS from %08lx seq %u", (unsigned long)s.src, s.seq);
     if (s.pos.valid) Serial.printf(" at %.6f %.6f", s.pos.lat, s.pos.lon);
     else Serial.print(" no fix");
@@ -277,6 +280,19 @@ class SerialApp : public rl::AppPort {
   }
   void onSosAck(uint32_t responder, uint16_t seq) override {
     Serial.printf("SOSACK from %08lx for seq %u\n", (unsigned long)responder, seq);
+  }
+  void onPeerIdent(uint32_t id, const std::string& name, bool firstSeen) override {
+    Serial.printf("IDENT %s %08lx%s%s\n", firstSeen ? "learned key of" : "name change", (unsigned long)id,
+                  name.empty() ? "" : " ", name.c_str());
+  }
+  void onKeyChange(uint32_t id, const uint8_t newEdPub[32], const std::string& name) override {
+    uint8_t x[gw::kKeySize];
+    gw::ed25519ToX25519(newEdPub, x);
+    Serial.printf("WARNING: %08lx%s%s sent a validly signed IDENT with a DIFFERENT key. The old key stays in use.\n"
+                  "  This means a forged ID collision unless you know why. To accept the new key:\n"
+                  "  peer %08lx %s\n",
+                  (unsigned long)id, name.empty() ? "" : " ", name.c_str(), (unsigned long)id,
+                  toHex(x, sizeof x).c_str());
   }
 };
 
@@ -297,19 +313,22 @@ void printStats() {
 }
 
 void printStatus() {
-  rl::Config def;
-  Serial.printf("node %08lx  board %s  up %llus\n", (unsigned long)g_set.id, RL_BOARD_NAME,
-                (unsigned long long)(nowMs() / 1000));
+  gw::Config def;
+  Serial.printf("node %08lx%s%s  board %s  up %llus\n", (unsigned long)g_set.id, g_set.name.empty() ? "" : " ",
+                g_set.name.c_str(), GW_BOARD_NAME, (unsigned long long)(nowMs() / 1000));
   Serial.printf("radio %.3f MHz SF9 BW125 CR4/5 pre16  out %d dBm (drive %d)\n", g_set.freqMHz,
                 outputFor(g_driveDbm), g_driveDbm);
   Serial.printf("pos %s %.6f %.6f (%s)", g_pos.valid ? "fix" : "nofix", g_pos.lat, g_pos.lon, g_posSrc);
-#if RL_HAS_GPS
+#if GW_HAS_GPS
   Serial.printf("  gps sentences %lu fixes %lu", (unsigned long)g_nmeaOk, (unsigned long)g_fixes);
 #endif
   Serial.printf("\nkeys: channel %s, %u peer%s%s%s\n", g_set.havePsk ? "on" : "off",
                 (unsigned)g_set.peers.size(), g_set.peers.size() == 1 ? "" : "s",
                 g_set.requireEnc ? ", plaintext DATA refused" : "", g_set.responder ? ", SOS responder" : "");
   printStats();
+  auto& st = g_router->stats();
+  Serial.printf("ident tx %lu rx %lu bad %lu key-changes %lu\n", (unsigned long)st.identTx,
+                (unsigned long)st.identRx, (unsigned long)st.identBad, (unsigned long)st.keyChanges);
   Serial.printf("tables: store %u/%u  seen %u/%u  neighbors %u/512  sos %u/%u\n",
                 (unsigned)g_router->storeSize(), (unsigned)def.storeCapacity, (unsigned)g_router->seenSize(),
                 (unsigned)kSeenCapacity, (unsigned)g_router->neighborTableSize(), (unsigned)g_router->sosCount(),
@@ -323,9 +342,9 @@ void printHelp() {
   Serial.print(
       "messages: send <hex-id> <text> | known <hex-id> <lat> <lon>\n"
       "sos:      sos <text> | sosstop | sosack <hex-id>\n"
-      "keys:     keys | peer <hex-id> <hex-pubkey> | peers | psk <64 hex>|off\n"
+      "keys:     keys | ident <hex-id> | peer <hex-id> <hex-pubkey> | peers | psk <64 hex>|off\n"
       "info:     status | stats | pos\n"
-      "settings: setpos <lat> <lon>|clear | power <dBm> | freq <MHz>\n"
+      "settings: setpos <lat> <lon>|clear | power <dBm> | freq <MHz> | name <text>\n"
       "          responder on|off | requireenc on|off | reboot | wipe confirm\n");
 }
 
@@ -360,7 +379,7 @@ void handleCommand(std::string line) {
   while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
   std::string rest = line;
   std::string cmd = word(rest);
-  rl::Router& r = *g_router;
+  gw::Router& r = *g_router;
   if (cmd == "send") {
     std::string id = word(rest);
     uint32_t dst;
@@ -387,8 +406,20 @@ void handleCommand(std::string line) {
   } else if (cmd == "pos") {
     Serial.printf("%s %.6f %.6f\n", g_pos.valid ? "fix" : "nofix", g_pos.lat, g_pos.lon);
   } else if (cmd == "keys") {
-    // same format as a ridgelined --peers line, so it can be pasted on the other node
+    // same format as a ghostwaved --peers line, so it can be pasted on the other node
     Serial.printf("%08lx %s\n", (unsigned long)r.id(), toHex(g_pub.data(), g_pub.size()).c_str());
+    Serial.printf("(ed25519 identity %s)\n", toHex(g_edPub.data(), g_edPub.size()).c_str());
+  } else if (cmd == "ident") {
+    uint32_t who;
+    if (!parseId(word(rest), who)) Serial.println("usage: ident <hex-id>");
+    else Serial.println(r.requestIdent(who, nowMs()) ? "IDENT requested" : "cannot request IDENT now");
+  } else if (cmd == "name") {
+    if (rest.size() > gw::kIdentNameMax) {
+      Serial.printf("name is at most %u bytes\n", (unsigned)gw::kIdentNameMax);
+      return;
+    }
+    g_prefs.putString("name", rest.c_str());
+    Serial.println("saved; reboot to apply");
   } else if (cmd == "peer") {
     std::string id = word(rest), hex = word(rest);
     Serial.println(addPeer(id, hex) ? "ok" : "bad peer (want <hex-id> <64 hex chars>)");
@@ -410,14 +441,14 @@ void handleCommand(std::string line) {
       g_prefs.putBytes("psk", k.data(), k.size());
       r.setChannelKey(k.data());
       g_set.havePsk = true;
-      rl::wipe(k.data(), k.size());
+      gw::wipe(k.data(), k.size());
       Serial.println("channel key set");
     }
-    rl::wipe(&arg[0], arg.size());
+    gw::wipe(&arg[0], arg.size());
   } else if (cmd == "sos") {
     if (r.startSos(rest, 0xFF, 0xFF, nowMs()))
       Serial.printf("SOS on%s, repeating until sosstop\n",
-                    rest.size() > rl::kSosTextMax ? " (text cut to 60 bytes)" : "");
+                    rest.size() > gw::kSosTextMax ? " (text cut to 60 bytes)" : "");
     else
       Serial.println("SOS rate limited, try again in a minute");
   } else if (cmd == "sosstop") {
@@ -500,7 +531,7 @@ void handleCommand(std::string line) {
     ESP.restart();
   } else if (cmd == "wipe") {
     if (word(rest) != "confirm") {
-      Serial.println("erases the node ID, identity key, channel key, peers and settings: wipe confirm");
+      Serial.println("erases the identity key (and so the node ID), channel key, peers and settings: wipe confirm");
       return;
     }
     g_prefs.clear();
@@ -526,13 +557,13 @@ void pollSerial() {
   }
 }
 
-#if RL_HAS_GPS
+#if GW_HAS_GPS
 void pollGps(uint64_t now) {
   while (Serial1.available()) {
     char c = static_cast<char>(Serial1.read());
     if (c == '\n') {
-      rl::Position p;
-      if (rl::parseNmea(g_nmeaLine, p)) {
+      gw::Position p;
+      if (gw::parseNmea(g_nmeaLine, p)) {
         ++g_fixes;
         g_pos = p;
         g_posSrc = "gps";
@@ -555,6 +586,9 @@ void gpsBegin() {
 
 }  // namespace
 
+// Ed25519 sign/verify (IDENT) runs in loop(): double the default 8 KB stack.
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+
 void setup() {
   Serial.begin(115200);
   uint32_t t0 = millis();
@@ -563,9 +597,7 @@ void setup() {
   digitalWrite(kPinVext, kVextOn ? HIGH : LOW);
 
   loadSettings();
-  rl::x25519Public(g_set.secret.data(), g_pub.data());
-
-  rl::Config cfg;
+  gw::Config cfg;
   cfg.nodeId = g_set.id;
   cfg.requireEncryption = g_set.requireEnc;
   cfg.responder = g_set.responder;
@@ -573,11 +605,12 @@ void setup() {
   uint64_t seed;
   esp_fill_random(&seed, sizeof seed);
   cfg.rngSeed = seed;
-  g_router = new rl::Router(cfg, g_radioPort, g_app);
-  g_router->setIdentityKey(g_set.secret.data());
-  rl::wipe(g_set.secret.data(), g_set.secret.size());
+  g_router = new gw::Router(cfg, g_radioPort, g_app);
+  bool identOk = g_router->setSigningKey(g_set.seed.data(), g_set.name);
+  gw::wipe(g_set.seed.data(), g_set.seed.size());
+  if (!identOk) Serial.println("identity key rejected (name too long?); IDENT disabled");
   if (g_set.havePsk) g_router->setChannelKey(g_set.psk.data());
-  rl::wipe(g_set.psk.data(), g_set.psk.size());
+  gw::wipe(g_set.psk.data(), g_set.psk.size());
   for (auto& p : g_set.peers)
     if (!g_router->addPeerKey(p.id, p.pub)) Serial.printf("stored peer %08lx rejected\n", (unsigned long)p.id);
 
@@ -586,13 +619,13 @@ void setup() {
     g_posSrc = "stored";
     g_router->setPosition(g_pos, nowMs());
   }
-#if RL_HAS_GPS
+#if GW_HAS_GPS
   gpsBegin();
 #endif
 
   bool radioOk = radioBegin();
-  Serial.printf("ridgeline %s node %08lx on %.3f MHz, %d dBm out\n", RL_BOARD_NAME, (unsigned long)g_set.id,
-                g_set.freqMHz, outputFor(g_driveDbm));
+  Serial.printf("ghostwave %s node %08lx%s%s on %.3f MHz, %d dBm out\n", GW_BOARD_NAME, (unsigned long)g_set.id,
+                g_set.name.empty() ? "" : " ", g_set.name.c_str(), g_set.freqMHz, outputFor(g_driveDbm));
   Serial.printf("key %s, channel key %s, %u peer key%s%s%s\n", toHex(g_pub.data(), g_pub.size()).c_str(),
                 g_set.havePsk ? "on" : "off", (unsigned)g_set.peers.size(), g_set.peers.size() == 1 ? "" : "s",
                 g_set.requireEnc ? ", plaintext DATA refused" : "", g_set.responder ? ", SOS responder" : "");
@@ -614,7 +647,7 @@ void loop() {
       g_router->onReceive(buf, len, g_radio.getRSSI(), now);
     g_radio.startReceive();
   }
-#if RL_HAS_GPS
+#if GW_HAS_GPS
   pollGps(now);
 #endif
   pollSerial();

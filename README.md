@@ -1,4 +1,4 @@
-# Ridgeline (working name)
+# GhostWave
 
 A LoRa mesh for people who move through places with no coverage. It is built on four ideas:
 
@@ -11,11 +11,11 @@ A LoRa mesh for people who move through places with no coverage. It is built on 
 DATA payloads are end-to-end encrypted with ChaCha20-Poly1305 (X25519 DM keys or a channel PSK).
 
 Status: **v0.1 prototype**. The design is in [docs/DESIGN.md](docs/DESIGN.md). Simulation results are in
-[DESIGN §14](docs/DESIGN.md#14-simulation-results-simridgesimpy-3-seeds-each).
+[DESIGN §14](docs/DESIGN.md#14-simulation-results-simghostsimpy-3-seeds-each).
 
 ## Headline results (simulation)
 
-| | Meshtastic-like flood | MeshCore-like path-learning | Ridgeline |
+| | Meshtastic-like flood | MeshCore-like path-learning | GhostWave |
 |---|---|---|---|
 | Backcountry: 25 km, 40 nodes, mostly hikers | 46–63 % delivered | 21 % delivered | **98.7 % delivered** |
 | Busy: 5 km, 120 nodes | 11 % within 60 s | 51 % within 60 s | **99.7 % within 60 s** |
@@ -28,34 +28,34 @@ DESIGN §14 before quoting these numbers.
 
 ```
 docs/DESIGN.md         protocol spec v0.1 (packet format, routing, DTN, budgets, SOS, security)
-sim/ridgesim.py        event-driven simulator: mobility, LoRa airtime, collisions, 3 protocols
+sim/ghostsim.py        event-driven simulator: mobility, LoRa airtime, collisions, 3 protocols
 sim/results/           raw output of the benchmark runs
 firmware/core/         portable C++17 protocol core (packet codec + AEAD, router, SOS, NMEA, airtime)
 firmware/tests/        host tests, including multi-node runs over a simulated radio
 firmware/third_party/  Monocypher 4.0.2 (vendored, pinned; BSD-2 / CC0)
-firmware/pi/           ridgelined: Raspberry Pi daemon for the Backcountry Signal HAT (RadioLib)
+firmware/pi/           ghostwaved: Raspberry Pi daemon for the Backcountry Signal HAT (RadioLib)
 firmware/mcu/          PlatformIO firmware for ESP32-S3 dev boards (Heltec Wireless Tracker V2, Heltec V3)
 ```
 
 ## Run on a dev board
 
 See [firmware/mcu/README.md](firmware/mcu/README.md) for flashing, the serial CLI and a two-board
-over-the-air test (encrypted DM + SOS). Quick version: `cd firmware/mcu && pio run -e heltec_v3 -t upload`.
+over-the-air test (IDENT key exchange, encrypted DM + SOS). Quick version: `cd firmware/mcu && pio run -e heltec_v3 -t upload`.
 
 ## Run the simulator
 
 ```bash
-cd sim && python3 ridgesim.py --scenario trail --seeds 1
+cd sim && python3 ghostsim.py --scenario trail --seeds 1
 ```
 
-Full benchmark (about 15 min; the busy scenario is slow): `python3 ridgesim.py --markdown`.
-Ablations: `--proto ridgeline ridgeline-nodtn ridgeline-noarea ridgeline-nobudget ridgeline-slots`.
-SOS reach to fixed nodes: `python3 ridgesim.py --scenario backcountry --proto flood3 ridgeline --sos`.
+Full benchmark (about 15 min; the busy scenario is slow): `python3 ghostsim.py --markdown`.
+Ablations: `--proto ghostwave ghostwave-nodtn ghostwave-noarea ghostwave-nobudget ghostwave-slots`.
+SOS reach to fixed nodes: `python3 ghostsim.py --scenario backcountry --proto flood3 ghostwave --sos`.
 
 ## Build and test the core (any machine)
 
 ```bash
-cd firmware && cmake -S . -B build && cmake --build build && ./build/ridgeline_tests
+cd firmware && cmake -S . -B build && cmake --build build && ./build/ghostwave_tests
 ```
 
 ## Run on the Pi HAT
@@ -69,9 +69,9 @@ Pins are taken from the HAT: CS BCM8 (CE0), DIO1 BCM6, BUSY BCM5, RESET BCM18, m
 4. Install the build tools: `sudo apt install cmake g++ git liblgpio-dev`.
 5. Build:
    ```bash
-   cd firmware && cmake -S . -B build -DRIDGELINE_BUILD_PI=ON -DRIDGELINE_BUILD_TESTS=OFF && cmake --build build
+   cd firmware && cmake -S . -B build -DGHOSTWAVE_BUILD_PI=ON -DGHOSTWAVE_BUILD_TESTS=OFF && cmake --build build
    ```
-6. Run: `sudo ./build/ridgelined` (GPS on `/dev/serial0`). For a bench test without a GPS fix, use
+6. Run: `sudo ./build/ghostwaved` (GPS on `/dev/serial0`). For a bench test without a GPS fix, use
    `--lat 46.87 --lon -113.99`.
 7. Type commands on stdin:
    - `send <hex-id> hello` sends a message.
@@ -84,7 +84,7 @@ Pins are taken from the HAT: CS BCM8 (CE0), DIO1 BCM6, BUSY BCM5, RESET BCM18, m
 
 ### Keys
 
-- **Identity key** (`--key`, default `/var/lib/ridgeline/identity.key`). This is an X25519 secret
+- **Identity key** (`--key`, default `/var/lib/ghostwave/identity.key`). This is an X25519 secret
   stored as 64 hex characters. It is created on first run with mode 600, in a mode-700 directory.
   The public half is printed at startup and by `keys`.
 - **Peers** (`--peers FILE`). One `<hex-id> <hex-pubkey>` per line; `#` starts a comment.
@@ -94,7 +94,7 @@ Pins are taken from the HAT: CS BCM8 (CE0), DIO1 BCM6, BUSY BCM5, RESET BCM18, m
   Every node with the same file can read them.
 - With neither a peer key nor a channel key, a message goes out in plaintext with only a CRC.
   `--require-enc` drops plaintext messages addressed to this node. They show in `stats` as `authfail`.
-- SOS frames are never encrypted, so any Ridgeline node can relay them and act on them (DESIGN §8).
+- SOS frames are never encrypted, so any GhostWave node can relay them and act on them (DESIGN §8).
   `--responder` makes the node reply `SOS_ACK` to every new SOS automatically.
 
 ### Two-node bench test
@@ -104,18 +104,18 @@ power at the default 10 dBm.
 
 1. **Start each node once to make its key.** On A:
    ```bash
-   sudo ./build/ridgelined --lat 46.8700 --lon -113.9900
+   sudo ./build/ghostwaved --lat 46.8700 --lon -113.9900
    ```
    On B, use `--lat 46.8710 --lon -113.9900`. This is a made-up position 110 m north; the boards can
    still sit on the same bench. Each node prints
-   `ridgelined node <id> ...` and `key <pubkey>, ...`.
+   `ghostwaved node <id> ...` and `key <pubkey>, ...`.
 2. **Swap public keys.** Type `keys` on each node. Stop both nodes with Ctrl-C. On each Pi, run
-   `sudo mkdir -p /etc/ridgeline`. Copy A's `keys` line into `/etc/ridgeline/peers` on B, and B's line
+   `sudo mkdir -p /etc/ghostwave`. Copy A's `keys` line into `/etc/ghostwave/peers` on B, and B's line
    into the same file on A.
 3. **Restart both with the peer keys, refusing plaintext.** Run on A, then the same on B with B's
    position:
    ```bash
-   sudo ./build/ridgelined --lat 46.8700 --lon -113.9900 --peers /etc/ridgeline/peers --require-enc
+   sudo ./build/ghostwaved --lat 46.8700 --lon -113.9900 --peers /etc/ghostwave/peers --require-enc
    ```
    The startup line should say `1 peer key, plaintext DATA refused`.
 4. **Encrypted DM.** On A, type `known <B-id> 46.8710 -113.9900`, then `send <B-id> hello over aead`.
@@ -135,7 +135,7 @@ power at the default 10 dBm.
 Defaults: 914.875 MHz, SF9/BW125, sync word 0x24, **10 dBm SX1262 drive**. The E22P's power
 amplifier adds roughly 8–10 dB on top. Check DESIGN §12 before raising the power.
 
-**Verified so far:** the core builds and all 99 host tests pass. `ridgelined` compiles and links
+**Verified so far:** the core builds and all 99 host tests pass. `ghostwaved` compiles and links
 against RadioLib 7.8.1 on macOS, using a stub `lgpio` (no lgpio for macOS). Key-file handling was run
 against that build: create with mode 600, reload, bad and missing files, and peers-file parsing.
 **Not verified yet:** running on real hardware, including the bench test above.

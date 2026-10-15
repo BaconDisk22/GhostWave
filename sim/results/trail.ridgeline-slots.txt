@@ -1,5 +1,0 @@
-trail        ridgeline-slots      pdr=1.000 pdr60=0.994 lat_med=    2.9s air/msg=  7.81s util=0.208 tx=5707 lost=48010
-
-| scenario | protocol | delivered | delivered ≤60 s | median latency | airtime per delivered msg | channel util |
-|---|---|---|---|---|---|---|
-| trail | ridgeline-slots | 100.0 % | 99.4 % | 2.9 s | 7.81 s | 20.8 % |
