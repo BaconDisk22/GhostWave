@@ -607,6 +607,8 @@ class GhostWave(Proto):
     BEACON_MOVE, BEACON_MAX, BEACON_MIN, UTIL_TARGET = 250, 900, 60, 0.25
     SOS_TTL, SOS_REOFFER, SOS_DUP_CANCEL, BEACON_REPLY_MIN = 24 * 3600, 900, 2, 10
     SOS_RELAY_GAP = 900     # a relay re-floods a superseding seq at most this often
+    SOS_RETRY, SOS_RETRY_MAX = 60, 4   # re-offer to a known neighbor still lacking it: 60, 120, 240, 480 s
+    SOS_PROBE_CAP = 8
 
     def __init__(self, slots=False, dtn=True, budget=True, area=True, name="ghostwave"):
         self.slotted, self.dtn, self.use_budget, self.name = slots, dtn, budget, name
@@ -630,6 +632,7 @@ class GhostWave(Proto):
         n.lastb_pos, n.lastb_t = None, -1e9
         n.util, n.heard_mark, n.util_t = 0.0, 0.0, 0.0
         n.sos, n.sos_seq, n.beacon_soon = {}, 0, False
+        n.sos_probe = {}        # neighbor we offered to -> when to ask for its beacon
         self.sim.at(self.sim.rng.uniform(0, 30), self._tick, n)
 
     def _me(self, n):
@@ -650,9 +653,11 @@ class GhostWave(Proto):
         self._retry_store(n)
         for src in [s for s, e in n.sos.items() if now - e["t"] > self.SOS_TTL]:
             del n.sos[src]
+        if not n.sos:
+            n.sos_probe.clear()
         self.sim.at(now + 30, self._tick, n)
 
-    def _beacon(self, n):
+    def _beacon(self, n, ask=None):
         now, me = self.sim.t, self._me(n)
         fresh = [(k, v) for k, v in n.loc.items() if now - v[2] < 1800]
         gossip = self.sim.rng.sample(fresh, min(3, len(fresh)))
@@ -661,13 +666,35 @@ class GhostWave(Proto):
             bloom |= _bloom_bits(src, mid)
         n.mac.send(Frame("beacon", n.id, BCAST, 0, self.BEACON,
                          meta={"pos": me, "t": now, "gossip": gossip, "own": True,
-                               "bloom": bloom, "sos": bool(n.sos)}))
+                               "bloom": bloom, "sos": bool(n.sos), "ask": ask}))
         n.lastb_pos, n.lastb_t = me, now
 
     def _beacon_reply(self, n):
         n.beacon_soon = False
         if self.sim.t - n.lastb_t >= self.BEACON_REPLY_MIN:
             self._beacon(n)
+
+    def _sos_probe(self, n, nb, due):
+        """Beacon with next_hop = nb so that it answers with its Bloom filter."""
+        if n.sos_probe.get(nb) != due:
+            return                       # cancelled or rescheduled
+        if self.sim.t - n.lastb_t < self.BEACON_REPLY_MIN:
+            self.sim.at(n.lastb_t + self.BEACON_REPLY_MIN, self._sos_probe, n, nb, due)
+            return
+        del n.sos_probe[nb]
+        self._beacon(n, ask=nb)
+
+    def _probe_at(self, n, nb, at, jitter):
+        cur = n.sos_probe.get(nb)
+        if (cur >= at) if cur is not None else len(n.sos_probe) >= self.SOS_PROBE_CAP:
+            return
+        due = at + self.sim.rng.uniform(0, jitter)
+        n.sos_probe[nb] = due
+        self.sim.at(due, self._sos_probe, n, nb, due)
+
+    @classmethod
+    def _retry_gap(cls, tries):
+        return min(cls.SOS_RETRY << min(tries, 8), cls.SOS_REOFFER)
 
     # ---- SOS lane (DESIGN §8)
     def start_sos(self, n):
@@ -694,6 +721,7 @@ class GhostWave(Proto):
                 o = e["offer"]
                 if o is not None and not o.sent:
                     o.cancelled = True           # someone else already offered it
+                n.sos_probe.pop(f.tx, None)   # its sender has it
             else:
                 self._offer_sos(n, None, 0)      # sender is behind
             return
@@ -719,17 +747,38 @@ class GhostWave(Proto):
         if not g.cancelled:
             n.mac.send(g)
 
-    def _offer_sos(self, n, nb, bloom):
-        """Offer every SOS we hold that the neighbor's beacon Bloom filter lacks."""
+    def _offer_sos(self, n, nb, bloom, known=False, probe=False):
+        """Offer every SOS we hold that the neighbor's beacon Bloom filter lacks.
+        known: heard within NB_FRESH yet carrying no SOS, so an earlier offer was
+        lost: re-offer with backoff. probe: ask for its Bloom filter (beacon with
+        next_hop = it) when a re-offer is due. Returns whether the neighbor lacks
+        anything we hold."""
         now = self.sim.t
+        lacks = False
         for src, e in n.sos.items():
             if src == nb:
                 continue
+            o = e["offered"].get(nb)
             if bloom is not None and _bloom_has(bloom, src, e["f"].mid):
+                if o:
+                    o[1] = 0
                 continue
-            if now - e["offered"].get(nb, -1e9) < self.SOS_REOFFER:
+            lacks = True
+            tries, ready = 0, now
+            if o:
+                ready = o[0] + (self._retry_gap(o[1]) if known else self.SOS_REOFFER)
+                if known:
+                    tries = o[1] + 1
+            if known:
+                ready = max(ready, e["t"] + self.SOS_RETRY)   # our own flood may still reach it
+            if now < ready:
+                if probe and known and tries <= self.SOS_RETRY_MAX:
+                    self._probe_at(n, nb, ready, self.SOS_RETRY / 4)
                 continue
-            e["offered"][nb] = now
+            e["offered"][nb] = [now, tries]
+            if probe and tries < self.SOS_RETRY_MAX:
+                gap = self._retry_gap(tries)
+                self._probe_at(n, nb, now + gap, gap / 4)
             o = e["offer"]
             if o is not None and not o.sent and not o.cancelled:
                 continue
@@ -739,6 +788,7 @@ class GhostWave(Proto):
             g.meta["own"] = False
             e["offer"] = g
             self.sim.at(now + self.sim.rng.uniform(0, 2 * airtime(g.size) + 0.12), self._sos_fire, n, g)
+        return lacks
 
     def _learn(self, n, nid, pos, t):
         if nid == n.id:
@@ -752,12 +802,25 @@ class GhostWave(Proto):
         pos = f.meta["pos"]
         old = n.nb.get(f.src)
         is_new = old is None or now - old[2] >= self.NB_FRESH
-        if is_new:
-            self._offer_sos(n, f.src, f.meta["bloom"])
-        if f.meta["sos"] and is_new and not n.beacon_soon:
-            n.beacon_soon = True
-            self.sim.at(now + self.sim.rng.uniform(0.2, 2.0), self._beacon_reply, n)
-        n.nb[f.src] = (pos[0], pos[1], now)
+        # a known neighbor carrying no SOS missed ours: re-offer with backoff;
+        # one merely behind by a seq is left to the relay gap
+        empty = not f.meta["sos"]
+        lacks = True
+        if is_new or empty:
+            lacks = self._offer_sos(n, f.src, f.meta["bloom"], known=not is_new, probe=empty)
+        if not lacks or not empty:
+            n.sos_probe.pop(f.src, None)
+        # answer an SOS carrier that is new, or known while we hold no SOS
+        # (once per filter: it came back carrying one), or a probe to us
+        theirs = f.meta["bloom"]
+        answered = 0 if is_new else old[3]
+        ahead = not n.sos and theirs != answered
+        if (f.meta["sos"] and (is_new or ahead)) or f.meta.get("ask") == n.id:
+            answered = theirs
+            if not n.beacon_soon:
+                n.beacon_soon = True
+                self.sim.at(now + self.sim.rng.uniform(0.2, 2.0), self._beacon_reply, n)
+        n.nb[f.src] = (pos[0], pos[1], now, answered)
         self._learn(n, f.src, pos, now)
         for nid, v in f.meta["gossip"]:
             self._learn(n, nid, (v[0], v[1]), v[2])
