@@ -52,7 +52,7 @@ SOS reach to fixed nodes: `python3 ghostsim.py --scenario backcountry --proto fl
 ## Build and test the core (any machine)
 
 ```bash
-cd firmware && cmake -S . -B build && cmake --build build && ./build/ghostwave_tests
+cd firmware && cmake -S . -B build && cmake --build build && ctest --test-dir build --output-on-failure
 ```
 
 ## Virtual mesh (no hardware)
@@ -67,6 +67,10 @@ air. The channel model is the same as `sim/ghostsim.py`:
 - **Collisions:** two overlapping frames both fail unless one is 6 dB stronger.
 - **Half duplex:** a node cannot receive while it transmits.
 - **RSSI:** the router is given the derived RSSI.
+- **Repeats:** each datagram carries a per-sender counter, and the receiver drops a datagram it has
+  already seen. macOS loops multicast back on more than one path, so one frame can arrive twice and
+  the copies would collide with each other. The counter starts from the clock, so a restarted
+  daemon's frames are not mistaken for repeats.
 - **Busy channel:** the channel reads busy while a frame above sensitivity is still within its LoRa
   airtime. This is what the router's CSMA checks.
 
@@ -104,7 +108,9 @@ A (0 km) --- B (1.5 km)  . . . gap . . .  C (9 km) --- D (10.5 km)
 3. B picks both up and walks to 8 km. Its position comes from a fake NMEA file.
 4. B carries both across the gap.
 
-The script passes when D prints the decrypted DM and C and D both hold the SOS. A run takes about
+The script passes when D prints the decrypted DM and C and D both hold the SOS. A sniffer
+(python3) on the group also records every datagram, and the run fails if the DM text ever went over
+the air in clear. The SOS text is sent in clear by design. A run takes about
 70 s. A gets no `DELIVERED`, because D's receipt waits on the far side until someone walks back.
 Env vars: `VMESH_VLOG=1` logs every frame, `VMESH_KEEP=1` keeps the logs, and `VMESH_IF` and
 `VMESH_PORT` choose the network.
