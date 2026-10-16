@@ -75,12 +75,13 @@ gga() {
   printf '$%s*%02X\r\n' "$body" "$sum"
 }
 
-# start NAME ID KM [extra args...]   (KM "nmea" = position from $work/NAME.nmea)
+# start NAME KM [extra args...]   (KM "nmea" = position from $work/NAME.nmea)
+# The node ID comes from the Ed25519 identity the daemon generates on first run.
 fdnum=3
 start() {
-  local n=$1 id=$2 km=$3
-  shift 3
-  local args=(--radio udp --mcast "239.77.0.1:$port" --id "$id" --key "$work/$n.key")
+  local n=$1 km=$2
+  shift 2
+  local args=(--radio udp --mcast "239.77.0.1:$port" --key "$work/$n.key" --name "$n")
   [ -n "${VMESH_IF:-}" ] && args+=(--vif "$VMESH_IF")
   [ "${VMESH_VLOG:-0}" = 1 ] && args+=(--vlog)
   if [ "$km" = nmea ]; then args+=(--nmea "$work/$n.nmea"); else args+=(--lat "$(lat_at "$km")" --lon "$LON"); fi
@@ -109,21 +110,22 @@ wait_for() {   # wait_for SECONDS NAME PATTERN
 show() { grep -E "$2" "$work/$1.log" | sed "s/^/    $1: /"; }
 last() { grep -E "$2" "$work/$1.log" | tail -1 | sed "s/^/    $1: /"; }
 
-ID_A=0a000001 ID_B=0b000002 ID_C=0c000003 ID_D=0d000004
-
 say "work dir $work, group 239.77.0.1:$port"
 gga "$(lat_at 1.5)" >"$work/B.nmea"
 # staggered, so the four start-up beacons do not all collide
-start A $ID_A 0; sleep 1
-start B $ID_B nmea --responder; sleep 1
-start C $ID_C 9; sleep 1
-start D $ID_D 10.5 --require-enc
+start A 0; sleep 1
+start B nmea --responder; sleep 1
+start C 9; sleep 1
+start D 10.5 --require-enc
 
 for n in $names; do
   wait_for 5 $n "^key " || { say "FAIL: $n did not start"; cat "$work/$n.log"; exit 1; }
 done
-pub_A=$(awk '/^key /{print substr($2,1,64); exit}' "$work/A.log")
-pub_D=$(awk '/^key /{print substr($2,1,64); exit}' "$work/D.log")
+node_id() { awk '/^ghostwaved node /{print $3; exit}' "$work/$1.log"; }
+ID_A=$(node_id A) ID_B=$(node_id B) ID_C=$(node_id C) ID_D=$(node_id D)
+say "node IDs (from each identity key): A $ID_A, B $ID_B, C $ID_C, D $ID_D"
+pub_A=$(awk '/^key ed25519 /{print substr($3,1,64); exit}' "$work/A.log")
+pub_D=$(awk '/^key ed25519 /{print substr($3,1,64); exit}' "$work/D.log")
 cmd A peer $ID_D "$pub_D"
 cmd D peer $ID_A "$pub_A"
 say "A and D swapped public keys; D refuses plaintext (--require-enc)"
