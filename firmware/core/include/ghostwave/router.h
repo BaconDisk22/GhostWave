@@ -247,12 +247,11 @@ class Router {
   void reattempt(const Key& k, uint64_t now);
   bool closerNeighbor(const Position& tgt, uint64_t maxAgeMs, uint64_t now) const;
   void sendBeacon(uint64_t now, uint16_t to = 0);
-  uint64_t ownBloom() const;
   bool openData(const Packet& p, std::vector<uint8_t>& plain);
   void sendSosNow(uint64_t now);
   void onSos(const Packet& p, uint64_t now);
   void onSosAck(const Packet& p, uint64_t now);
-  bool offerSos(uint32_t nbId, const uint8_t* bloom, bool known, uint64_t now);
+  bool offerSos(uint32_t nbId, const uint8_t* bloom, bool known, bool probe, uint64_t now);
   void probeSos(uint16_t nb16, uint64_t at, uint64_t jitterMs);
   void sosTick(uint64_t now);
   bool storePeer(uint32_t id, const uint8_t xPub[32], bool pinned, uint64_t now);
