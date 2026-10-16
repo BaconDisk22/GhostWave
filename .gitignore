@@ -3,3 +3,4 @@ firmware/build-*/
 __pycache__/
 build/
 .DS_Store
+.pio/

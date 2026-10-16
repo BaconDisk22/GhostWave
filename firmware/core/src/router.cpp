@@ -313,6 +313,17 @@ void Router::tick(uint64_t now) {
           !awaiting_.count(it->first) && !store_.count(it->first))
              ? seen_.erase(it)
              : std::next(it);
+  // Over capacity (only on a very busy channel): drop the oldest entries that
+  // nothing else refers to. A dropped one at worst lets an old duplicate through.
+  while (cfg_.seenCapacity && seen_.size() > cfg_.seenCapacity) {
+    auto victim = seen_.end();
+    for (auto it = seen_.begin(); it != seen_.end(); ++it) {
+      if (pending_.count(it->first) || awaiting_.count(it->first) || store_.count(it->first)) continue;
+      if (victim == seen_.end() || it->second.t < victim->second.t) victim = it;
+    }
+    if (victim == seen_.end()) break;
+    seen_.erase(victim);
+  }
 
   serviceMac(now);
 }
@@ -618,6 +629,11 @@ void Router::onBeacon(const Packet& p, uint64_t now) {
   if ((carrier && (isNew || ahead)) || (p.nextHop && p.nextHop == me16())) {
     beaconSoonAt_ = now + rng_.range(200, 2000);
     answered = theirs;
+  }
+  if (old == nb_.end() && nb_.size() >= kLocCapacity) {
+    nb_.erase(std::min_element(nb_.begin(), nb_.end(), [](auto& a, auto& b) {
+      return a.second.heardMs < b.second.heardMs;
+    }));
   }
   nb_[p.src] = {p.fwdPos, now, answered};
   learn(p.src, p.fwdPos, now);

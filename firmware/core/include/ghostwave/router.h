@@ -90,6 +90,7 @@ struct Config {
   size_t sosCapacity = 16;           // distinct originators held
   uint32_t identIntervalMs = 60 * 60 * 1000;   // broadcast IDENT this often; 0 = only on request
   size_t peerCapacity = 64;          // peer keys held (pinned + learned)
+  size_t seenCapacity = 0;           // duplicate-suppression entries; 0 = unbounded (MCU ports set it)
 };
 
 struct Key {
@@ -162,6 +163,8 @@ class Router {
   const RouterStats& stats() const { return stats_; }
   size_t storeSize() const { return store_.size(); }
   size_t neighborCount(uint64_t nowMs) const;
+  size_t neighborTableSize() const { return nb_.size(); }
+  size_t seenSize() const { return seen_.size(); }
   uint32_t id() const { return cfg_.nodeId; }
 
  private:

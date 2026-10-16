@@ -957,6 +957,54 @@ static void testVirtualChannel() {
   }
 }
 
+// MCU ports cap the duplicate-suppression and neighbor tables (bounded heap).
+static void testTableCaps() {
+  std::printf("router: seen / neighbor table caps\n");
+  struct NullRadio : RadioPort {
+    bool channelBusy() override { return false; }
+    bool transmit(const uint8_t*, size_t) override { return true; }
+  } radio;
+  struct NullApp : AppPort {
+    size_t n = 0;
+    void onMessage(uint32_t, uint32_t, const std::vector<uint8_t>&) override { ++n; }
+  } app;
+  Config cfg;
+  cfg.nodeId = 0x77;
+  cfg.seenCapacity = 16;
+  Router r(cfg, radio, app);
+  uint8_t buf[kMaxFrame];
+  uint64_t now = 1000;
+  for (uint32_t i = 0; i < 100; ++i) {
+    Packet p;
+    p.src = 0x1000 + i;
+    p.dst = 0x77;
+    p.msgId = i + 1;
+    p.payload = {'m'};
+    size_t n = encode(p, buf, sizeof buf);
+    r.onReceive(buf, n, -90, now);
+    now += 50;
+    r.tick(now);
+  }
+  CHECK(app.n == 100);
+  std::printf("  seen entries after 100 messages: %zu (cap 16)\n", r.seenSize());
+  CHECK(r.seenSize() <= 16);
+
+  for (uint32_t i = 0; i < 600; ++i) {
+    Packet b;
+    b.type = PType::Beacon;
+    b.mode = Mode::ScopedFlood;
+    b.hopsLeft = 0;
+    b.src = 0x20000 + i;
+    b.hasFwdPos = true;
+    b.fwdPos = {46.5 + i * 1e-4, -114.0, true};
+    size_t n = encode(b, buf, sizeof buf);
+    r.onReceive(buf, n, -90, now);
+    now += 10;
+  }
+  std::printf("  neighbor table after 600 beaconing nodes: %zu (cap 512)\n", r.neighborTableSize());
+  CHECK(r.neighborTableSize() == 512);
+}
+
 int main() {
   testPacket();
   testAead();
@@ -976,6 +1024,7 @@ int main() {
   testIdentForgery();
   testIdentRekey();
   testVirtualChannel();
+  testTableCaps();
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   return g_fail ? 1 : 0;
 }
