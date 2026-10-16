@@ -609,6 +609,7 @@ class GhostWave(Proto):
     SOS_RELAY_GAP = 900     # a relay re-floods a superseding seq at most this often
     SOS_RETRY, SOS_RETRY_MAX = 60, 4   # re-offer to a known neighbor still lacking it: 60, 120, 240, 480 s
     SOS_PROBE_CAP = 8
+    SOS_ECHO_WAIT, SOS_ECHO_JITTER, SOS_RESEND_MAX = 15, 5, 2   # early re-send of our own seq
 
     def __init__(self, slots=False, dtn=True, budget=True, area=True, name="ghostwave"):
         self.slotted, self.dtn, self.use_budget, self.name = slots, dtn, budget, name
@@ -633,6 +634,7 @@ class GhostWave(Proto):
         n.util, n.heard_mark, n.util_t = 0.0, 0.0, 0.0
         n.sos, n.sos_seq, n.beacon_soon = {}, 0, False
         n.sos_probe = {}        # neighbor we offered to -> when to ask for its beacon
+        n.sos_echo = False      # heard a neighbor relay (or carry) one of our seqs
         self.sim.at(self.sim.rng.uniform(0, 30), self._tick, n)
 
     def _me(self, n):
@@ -705,10 +707,32 @@ class GhostWave(Proto):
         n.sos[n.id] = {"f": f, "seq": n.sos_seq, "t": self.sim.t, "flood": None, "dups": 0,
                        "offer": None, "offered": old["offered"] if old else {}, "relay_t": self.sim.t}
         n.mac.send(f)            # prio 2: jumps the queue and bypasses the budget
+        n.sos_own = f
         self.sim.at(self.sim.t + SOS_REPEAT, self.start_sos, n)
+        # until a relay of one of our seqs is heard, a lost frame (the only
+        # neighbor was transmitting) would cost a whole SOS_REPEAT: re-send early
+        if not n.sos_echo and self.SOS_RESEND_MAX:
+            self.sim.at(self.sim.t + self.SOS_ECHO_WAIT + self.sim.rng.uniform(0, self.SOS_ECHO_JITTER),
+                        self._sos_resend, n, n.sos_seq, 0)
+
+    def _sos_resend(self, n, seq, done):
+        if n.sos_echo or seq != n.sos_seq or not self._nb_count(n):
+            return
+        if not n.sos_own.sent and not n.sos_own.cancelled:   # still queued: wait from when it goes out
+            self.sim.at(self.sim.t + self.SOS_ECHO_WAIT, self._sos_resend, n, seq, done)
+            return
+        g = n.sos[n.id]["f"].copy(hops=self.HOPS)
+        n.sos_own = g
+        n.mac.send(g)
+        if done + 1 < self.SOS_RESEND_MAX:
+            wait = self.SOS_ECHO_WAIT * 2 ** (done + 1)
+            self.sim.at(self.sim.t + wait + self.sim.rng.uniform(0, self.SOS_ECHO_JITTER),
+                        self._sos_resend, n, seq, done + 1)
 
     def _on_sos(self, n, f):
         if f.src == n.id:
+            if f.meta["seq"] == n.sos_seq:
+                n.sos_echo = True        # a neighbor relayed or offered it
             return
         e = n.sos.get(f.src)
         if e and f.meta["seq"] <= e["seq"]:
@@ -805,6 +829,9 @@ class GhostWave(Proto):
         # a known neighbor carrying no SOS missed ours: re-offer with backoff;
         # one merely behind by a seq is left to the relay gap
         empty = not f.meta["sos"]
+        own = n.sos.get(n.id)
+        if not empty and own and _bloom_has(f.meta["bloom"], n.id, own["f"].mid):
+            n.sos_echo = True            # it carries our current seq
         lacks = True
         if is_new or empty:
             lacks = self._offer_sos(n, f.src, f.meta["bloom"], known=not is_new, probe=empty)
