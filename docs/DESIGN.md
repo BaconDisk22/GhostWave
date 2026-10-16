@@ -136,6 +136,9 @@ UNICAST and add `dst_pos` en route. Everything else is authenticated end to end 
  13  11×n gossip         up to 3 entries: node ID (4) + pos (6) + age (1)
 ```
 
+A beacon is anycast (`next_hop = 0`), except when an SOS holder checks an offer it made: then
+`next_hop` is that neighbor, which answers with its own beacon (§8).
+
 The beacon's own position is in `fwd_pos`. Size with 3 gossip entries: 19 + 6 + 13 + 33 + 4 =
 **75 bytes**. (The simulator models 64 B; the 11 extra bytes don't change any conclusion.)
 
@@ -342,6 +345,22 @@ benefit**.
   cancelled if another holder offers first. A beacon carries `carrying_sos`. A node that sees it
   from a new neighbor beacons early (0.2–2 s later, ≥ 10 s since its last beacon), so the
   carrier gets the Bloom filter it needs without waiting up to 15 min.
+- **Lost offers are re-offered.** An offer is one frame, and a hidden terminal (a third node that
+  can't hear the offerer) can collide with it. A beacon from a *known* neighbor (heard within
+  20 min) whose Bloom filter still lacks the seq gets a re-offer: at least 60 s after the last
+  offer, then 120, 240 and 480 s (capped at 15 min), and not within 60 s of the holder hearing
+  the seq, while its scoped flood may still get there.
+- **Probes.** A stationary neighbor beacons only every 15 min, so each offer (or offer held back
+  by those gaps) schedules a **probe**: a beacon with `next_hop` = that neighbor, sent when a
+  re-offer becomes allowed plus up to 25 % jitter. The neighbor answers with an early beacon
+  (0.2–2 s, ≥ 10 s since its last). Probes stop after four re-offers, and are dropped once the
+  neighbor's filter has the seq or it is heard relaying it. At most 8 are pending.
+- A node also beacons early for a *known* neighbor carrying SOS when that neighbor's Bloom filter
+  has bits its own lacks, once per distinct filter. This covers a carrier that left, picked up an
+  SOS elsewhere and came back within 20 min, which isn't "new" to anyone.
+- Before these rules, one lost offer, or a carrier returning to known neighbors, stalled the SOS
+  for 15–20 min. The 4-node UDP demo showed it in about 1 run in 8, and host tests now reproduce
+  both cases.
 - SOS jumps every transmit queue and bypasses fair-share budgets.
 - Any node marked `responder` (or a gateway) replies with `SOS_ACK` (type 0x07, scoped flood,
   payload = acked `seq`) to each new `seq`. Phones show a big "help acknowledged by X" banner.

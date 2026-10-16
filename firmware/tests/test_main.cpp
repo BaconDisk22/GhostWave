@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -292,6 +293,8 @@ struct Medium {
   uint32_t txCount = 0;
   std::vector<uint8_t> txTypes;
   std::vector<std::vector<uint8_t>> frames;
+  // returns true to lose a frame for every receiver (a collision at all of them)
+  std::function<bool(int from, const uint8_t* buf, size_t len)> drop;
 
   SimNode& add(uint32_t id, double kmNorth, double kmEast = 0, bool responder = false) {
     auto n = std::make_unique<SimNode>();
@@ -320,6 +323,7 @@ struct Medium {
     ++txCount;
     txTypes.push_back(buf[0] & 0x1F);
     frames.emplace_back(buf, buf + len);
+    if (drop && drop(from, buf, len)) return;
     for (auto& n : nodes) {
       if (n->radio.idx == from) continue;
       double d = distanceM(nodes[from]->pos, n->pos);
@@ -517,6 +521,74 @@ static void testSosPartitionedChain() {
   m.move(b, 30);                                // out of everyone's range
   m.run(25ull * 3600 * 1000, 1000);   // coarse steps: nobody is in range
   CHECK(d.router->sosCount() == 0 && c.router->sosCount() == 0);
+}
+
+static void testSosLostOffer() {
+  std::printf("router: a lost SOS offer is re-offered once the neighbor's Bloom filter still lacks it\n");
+  Medium m;
+  auto& a = m.add(600, 0);
+  auto& b = m.add(601, 2);
+  auto& c = m.add(602, 9);
+  auto& d = m.add(603, 11);
+  int bi = b.radio.idx;
+  int lost = 0;
+  auto sosFrames = [&] {   // SOS frames not sent by a (a re-sends its own every 5 min)
+    uint32_t n = 0;
+    for (auto& f : m.frames) {
+      Packet p;
+      n += decode(f.data(), f.size(), p) && p.type == PType::Sos && p.prevHop != shortId(600);
+    }
+    return n;
+  };
+  // b's first offer to c collides with a hidden terminal: nobody hears it
+  m.drop = [&](int from, const uint8_t* buf, size_t len) {
+    Packet p;
+    if (from != bi || lost || !decode(buf, len, p)) return false;
+    if (p.type != PType::Sos || p.nextHop != shortId(602)) return false;
+    ++lost;
+    return true;
+  };
+  m.run(5000);
+  CHECK(a.router->startSos("broken leg", 40, 3, m.now));
+  m.run(10000);
+  CHECK(b.router->hasSos(600));
+  m.move(b, 7.5);
+  uint64_t met = m.now;
+  uint32_t sosBefore = sosFrames(), beaconsBefore = m.count(PType::Beacon);
+  while (!c.router->hasSos(600) && m.now - met < 15 * 60 * 1000) m.run(1000);
+  CHECK(lost == 1);
+  CHECK(c.router->hasSos(600));
+  CHECK(m.now - met <= 3 * 60 * 1000);          // was 15-20 min before the re-offer
+  m.run(30000);
+  CHECK(d.router->hasSos(600));
+  // bounded: one re-offer, plus a probe beacon from b and c's answer
+  CHECK(sosFrames() - sosBefore <= 4);
+  CHECK(m.count(PType::Beacon) - beaconsBefore <= 8);
+
+  // once c and d hold it, their Bloom filters stop further offers and probes
+  sosBefore = sosFrames();
+  beaconsBefore = m.count(PType::Beacon);
+  m.run(20 * 60 * 1000);
+  CHECK(sosFrames() == sosBefore);
+  CHECK(m.count(PType::Beacon) - beaconsBefore <= 4);   // c, d, b: one 15-min beacon each
+}
+
+static void testSosKnownNeighbor() {
+  std::printf("router: an SOS reaches a neighbor heard before the carrier picked it up\n");
+  Medium m;
+  auto& a = m.add(600, 0);
+  auto& b = m.add(601, 7.5);                    // starts next to c: each knows the other
+  auto& c = m.add(602, 9);
+  m.run(5000);
+  m.move(b, 2);
+  CHECK(a.router->startSos("broken leg", 40, 3, m.now));
+  m.run(10000);
+  CHECK(b.router->hasSos(600) && !c.router->hasSos(600));
+  m.move(b, 7);                                 // back within 20 min, 10 s after hearing it
+  uint64_t met = m.now;
+  while (!c.router->hasSos(600) && m.now - met < 15 * 60 * 1000) m.run(1000);
+  CHECK(c.router->hasSos(600));
+  CHECK(m.now - met <= 2 * 60 * 1000);
 }
 
 // ------------------------------------------------------------------- IDENT --
@@ -896,6 +968,8 @@ int main() {
   testDuplicateSuppression();
   testEncryptedRouting();
   testSosPartitionedChain();
+  testSosLostOffer();
+  testSosKnownNeighbor();
   testIdentCrypto();
   testIdentExchange();
   testIdentRequest();

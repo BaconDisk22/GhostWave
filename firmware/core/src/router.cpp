@@ -26,12 +26,20 @@ constexpr size_t kIdentWantCapacity = 8;
 constexpr size_t kIdentAskedCapacity = 32;
 constexpr size_t kSosHeader = 4;      // seq (2), accuracy, battery
 constexpr size_t kOfferedCapacity = 32;
-constexpr uint64_t kSosReofferMs = 15 * 60 * 1000;
+constexpr uint64_t kSosReofferMs = 15 * 60 * 1000;   // to a neighbor met again
+constexpr uint64_t kSosRetryMs = 60 * 1000;   // first re-offer to a known neighbor still lacking it
+constexpr uint8_t kSosRetryMax = 4;           // probes after an offer: 60, 120, 240, 480 s
+constexpr size_t kSosProbeCapacity = 8;
 constexpr uint64_t kSosRelayGapMs = 15 * 60 * 1000;   // re-flood a superseding seq at most this often
 constexpr uint64_t kBeaconReplyMinMs = 10 * 1000;
 constexpr uint8_t kSosDupCancel = 2;  // counter-based flood suppression
 
 double clampd(double x, double lo, double hi) { return x < lo ? lo : x > hi ? hi : x; }
+
+// Re-offer gap to a known neighbor after `tries` re-offers: doubles, capped.
+uint64_t sosRetryGap(uint8_t tries) {
+  return std::min<uint64_t>(kSosRetryMs << std::min<uint8_t>(tries, 8), kSosReofferMs);
+}
 
 void put32(std::vector<uint8_t>& v, uint32_t x) {
   for (int i = 0; i < 4; ++i) v.push_back((x >> (8 * i)) & 0xFF);
@@ -591,12 +599,25 @@ void Router::onBeacon(const Packet& p, uint64_t now) {
   auto old = nb_.find(p.src);
   bool isNew = old == nb_.end() || now - old->second.heardMs >= kNbFreshMs;
   const uint8_t* bloom = p.payload.size() >= kBeaconFixed ? p.payload.data() + kBloomOff : nullptr;
-  if (isNew) offerSos(p.src, bloom, now);
-  // a new neighbor carrying SOS can only filter its offers by our Bloom
-  // filter: let it see one now instead of at our next scheduled beacon
-  if (isNew && !p.payload.empty() && (p.payload[0] & kBeaconSos))
+  // a known neighbor's Bloom filter still lacking an SOS we offered means the
+  // offer was lost (hidden terminal): re-offer with backoff (DESIGN §8)
+  bool lacks = true;
+  if (isNew || bloom) lacks = offerSos(p.src, bloom, !isNew, now);
+  if (!lacks) sosProbe_.erase(shortId(p.src));
+  // a neighbor carrying SOS can only filter its offers by our Bloom filter:
+  // let it see one now instead of at our next scheduled beacon, if it is new
+  // or its filter holds something ours lacks (once per filter it shows). A
+  // beacon with next_hop = us asks the same (an SOS holder checking an offer).
+  uint64_t theirs = 0, answered = isNew ? 0 : old->second.bloomAnswered;
+  if (bloom)
+    for (int i = 0; i < 8; ++i) theirs |= static_cast<uint64_t>(bloom[i]) << (8 * i);
+  bool carrier = !p.payload.empty() && (p.payload[0] & kBeaconSos);
+  bool ahead = bloom && (theirs & ~ownBloom()) && theirs != answered;
+  if ((carrier && (isNew || ahead)) || (p.nextHop && p.nextHop == me16())) {
     beaconSoonAt_ = now + rng_.range(200, 2000);
-  nb_[p.src] = {p.fwdPos, now};
+    answered = theirs;
+  }
+  nb_[p.src] = {p.fwdPos, now, answered};
   learn(p.src, p.fwdPos, now);
   wantIdent(p.src, now);
   if (p.payload.size() >= kBeaconFixed) {
@@ -778,7 +799,17 @@ void Router::beaconTick(uint64_t now) {
   retryStore(now);
 }
 
-void Router::sendBeacon(uint64_t now) {
+// Our beacon's Bloom filter, byte i in bits 8i..8i+7.
+uint64_t Router::ownBloom() const {
+  uint8_t bloom[8] = {0};
+  for (auto& [k, e] : store_) bloomAdd(bloom, k.src, k.mid);
+  for (auto& [src, e] : sos_) bloomAdd(bloom, src, e.pkt.msgId);
+  uint64_t b = 0;
+  for (int i = 0; i < 8; ++i) b |= static_cast<uint64_t>(bloom[i]) << (8 * i);
+  return b;
+}
+
+void Router::sendBeacon(uint64_t now, uint16_t to) {
   Packet b;
   b.type = PType::Beacon;
   b.mode = Mode::Unicast;   // 1-hop, never forwarded
@@ -787,6 +818,7 @@ void Router::sendBeacon(uint64_t now) {
   b.msgId = rng_.next();
   b.hopsLeft = 0;
   b.prevHop = me16();
+  b.nextHop = to;           // non-zero: that neighbor should answer with its beacon
   b.hasFwdPos = true;
   b.fwdPos = pos_;
   auto& pl = b.payload;
@@ -795,10 +827,8 @@ void Router::sendBeacon(uint64_t now) {
   pl.push_back(0);                                      // velocity: TODO from GPS RMC
   pl.push_back(static_cast<uint8_t>(clampd(util_, 0, 1) * 255));
   pl.push_back(static_cast<uint8_t>(std::min<size_t>(store_.size() + sos_.size(), 255)));
-  uint8_t bloom[8] = {0};
-  for (auto& [k, e] : store_) bloomAdd(bloom, k.src, k.mid);
-  for (auto& [src, e] : sos_) bloomAdd(bloom, src, e.pkt.msgId);
-  pl.insert(pl.end(), bloom, bloom + 8);
+  uint64_t bloom = ownBloom();
+  for (int i = 0; i < 8; ++i) pl.push_back(static_cast<uint8_t>(bloom >> (8 * i)));
   std::vector<std::pair<uint32_t, LocEntry>> fresh;
   for (auto& [id, l] : loc_)
     if (now - l.obsMs < 30 * 60 * 1000) fresh.push_back({id, l});
@@ -875,8 +905,9 @@ void Router::onSos(const Packet& p, uint64_t now) {
     if (seq == e.seq) {
       if (e.flood && !e.flood->sent && ++e.dups >= kSosDupCancel) e.flood->cancelled = true;
       if (e.offer && !e.offer->sent) e.offer->cancelled = true;   // someone else offered it
+      if (p.prevHop) sosProbe_.erase(p.prevHop);   // its sender has it: no need to check
     } else {
-      offerSos(0, nullptr, now);   // sender is behind: our newer seq goes out (rate-limited)
+      offerSos(0, nullptr, false, now);   // sender is behind: our newer seq goes out (rate-limited)
     }
     return;
   }
@@ -953,21 +984,45 @@ void Router::onSosAck(const Packet& p, uint64_t now) {
   t->readyAt = now + rng_.range(0, 2 * airtimeMs(cfg_.phy, encodedSize(g)) + kJitterMs);
 }
 
-// Offer every SOS we hold that `bloom` (a new neighbor's beacon filter) lacks.
+// Offer every SOS we hold that `bloom` (a neighbor's beacon filter) lacks.
+// known = false: a new neighbor, offered at most every kSosReofferMs. known =
+// true: one we heard within kNbFreshMs, so an earlier offer was probably lost;
+// re-offered after sosRetryGap (and not within kSosRetryMs of hearing the seq,
+// while the flood may still reach it). Each offer, or offer held back, schedules
+// a probe (a beacon with next_hop = it) so that its Bloom filter comes back
+// without waiting up to 15 min for its next beacon. Returns false if it lacks
+// nothing we hold.
 // nbId = 0 / bloom = null: offer to whoever is listening (a neighbor is behind).
-void Router::offerSos(uint32_t nbId, const uint8_t* bloom, uint64_t now) {
+bool Router::offerSos(uint32_t nbId, const uint8_t* bloom, bool known, uint64_t now) {
   uint16_t nb16 = shortId(nbId);
+  bool lacks = false;
   for (auto& [src, e] : sos_) {
     if (src == nbId) continue;                                   // its own SOS
-    if (bloom && bloomHas(bloom, src, e.pkt.msgId)) continue;     // already carries this seq
     auto o = e.offered.find(nb16);
-    if (o != e.offered.end() && now - o->second < kSosReofferMs) continue;
+    if (bloom && bloomHas(bloom, src, e.pkt.msgId)) {           // already carries this seq
+      if (o != e.offered.end()) o->second.tries = 0;
+      continue;
+    }
+    lacks = true;
+    uint8_t tries = 0;
+    uint64_t readyAt = now;
+    if (o != e.offered.end()) {
+      readyAt = o->second.t + (known ? sosRetryGap(o->second.tries) : kSosReofferMs);
+      if (known) tries = static_cast<uint8_t>(std::min<int>(o->second.tries + 1, 255));
+    }
+    if (known) readyAt = std::max(readyAt, e.heardMs + kSosRetryMs);   // our own flood may still reach it
+    if (now < readyAt) {
+      // held back: make sure its Bloom filter comes back once we may offer
+      if (known && tries <= kSosRetryMax) probeSos(nb16, readyAt, kSosRetryMs / 4);
+      continue;
+    }
     if (e.offered.size() >= kOfferedCapacity && o == e.offered.end()) {
       auto oldest = std::min_element(e.offered.begin(), e.offered.end(),
-                                     [](auto& a, auto& b) { return a.second < b.second; });
+                                     [](auto& a, auto& b) { return a.second.t < b.second.t; });
       e.offered.erase(oldest);
     }
-    e.offered[nb16] = now;
+    e.offered[nb16] = {now, tries};
+    if (nbId && tries < kSosRetryMax) probeSos(nb16, now + sosRetryGap(tries), sosRetryGap(tries) / 4);
     if (e.offer && !e.offer->sent && !e.offer->cancelled) continue;   // one queued copy serves all
     // an offer starts a fresh scoped flood in the neighbor's partition; nodes
     // that already hold this seq drop it, so it only spreads where it is new
@@ -980,10 +1035,30 @@ void Router::offerSos(uint32_t nbId, const uint8_t* bloom, uint64_t now) {
     e.offer->readyAt = now + rng_.range(0, 2 * airtimeMs(cfg_.phy, encodedSize(g)) + kJitterMs);
     ++stats_.sosTx;
   }
+  return lacks;
+}
+
+// Schedules a beacon with next_hop = nb16 at `at` plus up to `jitterMs`, unless
+// one is already due by then.
+void Router::probeSos(uint16_t nb16, uint64_t at, uint64_t jitterMs) {
+  auto it = sosProbe_.find(nb16);
+  if (it != sosProbe_.end() ? it->second >= at : sosProbe_.size() >= kSosProbeCapacity) return;
+  sosProbe_[nb16] = at + rng_.range(0, static_cast<uint32_t>(jitterMs));
 }
 
 void Router::sosTick(uint64_t now) {
   if (sosOn_ && now - sosLastTx_ >= cfg_.sosRepeatMs) sendSosNow(now);
+  if (sos_.empty()) sosProbe_.clear();
+  // one probe per beacon gap; the others wait their turn
+  for (auto it = sosProbe_.begin(); it != sosProbe_.end(); ++it) {
+    if (now < it->second) continue;
+    if (havePos_ && (!beaconed_ || now - lastBeaconT_ >= kBeaconReplyMinMs)) {
+      uint16_t to = it->first;
+      sosProbe_.erase(it);
+      sendBeacon(now, to);
+    }
+    break;
+  }
   for (auto it = sos_.begin(); it != sos_.end();) {
     bool own = it->first == cfg_.nodeId && sosOn_;
     if (!own && now - it->second.heardMs > cfg_.sosTtlMs) {
