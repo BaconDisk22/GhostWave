@@ -21,7 +21,7 @@ jobs:
         run: cmake --build build --parallel
       - name: Run tests
         working-directory: firmware
-        run: ./build/ghostwave_tests
+        run: ctest --test-dir build --output-on-failure
       - name: Virtual mesh demo (4 daemons over UDP multicast)
         working-directory: firmware
         run: ./pi/tools/vmesh.sh build/ghostwaved

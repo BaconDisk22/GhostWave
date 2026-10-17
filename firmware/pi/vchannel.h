@@ -82,4 +82,22 @@ class VirtualChannel {
   std::array<Rec, kMaxRecs> recs_{};
 };
 
+// Drops a datagram seen twice. macOS loops multicast back on more than one
+// path, so one transmission can arrive twice; the copies would then collide
+// with each other in VirtualChannel. Senders number their datagrams.
+class RepeatFilter {
+ public:
+  // True if (src, seq) was among the last kSize datagrams; records it if not.
+  bool repeat(uint32_t src, uint32_t seq);
+
+ private:
+  static constexpr size_t kSize = 64;
+  struct Entry {
+    bool used = false;
+    uint32_t src = 0, seq = 0;
+  };
+  std::array<Entry, kSize> recent_{};
+  size_t next_ = 0;
+};
+
 }  // namespace gw

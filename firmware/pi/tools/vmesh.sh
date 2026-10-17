@@ -6,7 +6,8 @@
 # The chain is partitioned: nothing in {A, B} can hear {C, D}. B is a hiker
 # whose position comes from a fake NMEA file. A sends an encrypted DM to D
 # and raises an SOS; B picks both up, walks to 8 km, and carries them over
-# the gap. The script passes when D prints the DM and both C and D hold the SOS.
+# the gap. The script passes when D prints the DM and both C and D hold the SOS,
+# and a sniffer on the multicast group never saw the DM text in clear.
 #
 # Usage: firmware/pi/tools/vmesh.sh [path/to/ghostwaved]
 # Env:   VMESH_PORT (default 47700), VMESH_IF (multicast interface address,
@@ -111,6 +112,28 @@ show() { grep -E "$2" "$work/$1.log" | sed "s/^/    $1: /"; }
 last() { grep -E "$2" "$work/$1.log" | tail -1 | sed "s/^/    $1: /"; }
 
 say "work dir $work, group 239.77.0.1:$port"
+DM="hello D, sealed for you only"
+# Sniffer: every datagram on the group, appended raw to air.bin, so the
+# results can check what actually went over the air.
+sniff=0
+if command -v python3 >/dev/null; then
+  python3 - "$port" "$work/air.bin" "${VMESH_IF:-0.0.0.0}" <<'PY' &
+import socket, sys
+port, out, vif = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+if hasattr(socket, "SO_REUSEPORT"):
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+s.bind(("", port))
+s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+             socket.inet_aton("239.77.0.1") + socket.inet_aton(vif))
+with open(out, "ab", buffering=0) as f:
+    while True:
+        f.write(s.recv(512))
+PY
+  pids="$pids $!"
+  sniff=1
+fi
 gga "$(lat_at 1.5)" >"$work/B.nmea"
 # staggered, so the four start-up beacons do not all collide
 start A 0; sleep 1
@@ -138,7 +161,7 @@ for n in $names; do last $n "^tx "; done
 
 say "A -> D: encrypted DM (D's position is known; nothing on A's side can reach it)"
 cmd A known $ID_D "$(lat_at 10.5)" $LON
-cmd A send $ID_D "hello D, sealed for you only"
+cmd A send $ID_D "$DM"
 say "A: SOS"
 cmd A sos "twisted ankle at the creek"
 wait_for 20 B "SOS from $ID_A" && say "B heard the SOS (and, as a responder, acked it)"
@@ -170,6 +193,22 @@ show C "^SOS from"
 show D "^(MSG from|SOS from)"
 for n in $names; do last $n "^tx "; last $n "^vradio heard"; done
 echo "    (A gets no DELIVERED: D's receipt is stored on the far side until someone walks back)"
+if [ $sniff = 1 ]; then
+  if [ ! -s "$work/air.bin" ]; then
+    say "FAIL: the sniffer captured nothing"
+    VMESH_KEEP=1
+    exit 1
+  fi
+  if LC_ALL=C grep -q -a -F "$DM" "$work/air.bin"; then
+    say "FAIL: the DM text went over the air in clear"
+    VMESH_KEEP=1
+    exit 1
+  fi
+  say "sniffer: $(LC_ALL=C grep -a -o GWV1 "$work/air.bin" | wc -l | tr -d ' ') frames captured, DM text never in clear"
+  LC_ALL=C grep -q -a -F "twisted ankle" "$work/air.bin" && say "  (the SOS text is in clear, by design: DESIGN §8)"
+else
+  say "sniffer skipped: no python3"
+fi
 echo
 if [ $ok = 1 ]; then
   say "PASS: the encrypted DM reached D and the SOS reached C and D across the partition"
