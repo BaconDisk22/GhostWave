@@ -149,16 +149,20 @@ for n in $names; do last $n "^tx "; done
 say "A -> D: encrypted DM (D's position is known; nothing on A's side can reach it)"
 cmd A known $ID_D "$(lat_at 10.5)" $LON
 cmd A send $ID_D "$DM"
-# A's SOS sent right behind the DM can meet B's forward of the DM: neither has
-# sensed the other yet, and B, transmitting, misses it (half duplex)
-sleep 3
+# Send immediately behind the DM: if B misses the SOS while forwarding,
+# A's early retry must recover without a demo-only delay.
 say "A: SOS"
 cmd A sos "twisted ankle at the creek"
 if wait_for 20 B "SOS from $ID_A"; then
   say "B heard the SOS (and, as a responder, acked it)"
 else
-  say "B missed A's SOS (collision); waiting for A's 5-min repeat"
-  wait_for 310 B "SOS from $ID_A" && say "B heard the repeat"
+  say "B missed A's SOS (collision); waiting for A's early retry"
+  if ! wait_for 70 B "SOS from $ID_A"; then
+    say "FAIL: B never heard the SOS or its early retries"
+    VMESH_KEEP=1
+    exit 1
+  fi
+  say "B heard an early retry"
 fi
 sleep 8
 cmd B stats

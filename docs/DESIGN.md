@@ -373,7 +373,8 @@ benefit**.
   offer), and no neighbor beacon whose Bloom filter holds it, within 15 s plus 0–5 s jitter, it
   re-sends the same frame (same `seq` and `msg_id`, so holders drop it as a duplicate). If there's
   still no echo, it re-sends once more 30 s (+ jitter) later, for at most two early re-sends per
-  seq. The 15 s wait starts when the frame actually leaves the queue. Once any of its seqs has
+  seq. Each echo wait starts when its frame actually leaves the queue, including a retry held
+  behind a busy channel. A failed radio transmission still schedules a bounded retry. Once any of its seqs has
   been heard back, the rule is off until `stopSos`/`startSos`. At that point a neighbor holds the
   SOS, and a later seq that is lost only leaves a stale position until the next repeat. Relays
   don't re-flood superseding seqs within 15 min anyway, so their silence would mean nothing.
