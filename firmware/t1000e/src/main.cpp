@@ -12,7 +12,10 @@ class ProbeRadio : public gw::RadioPort {
   bool channelBusy() override { return false; }
   bool transmit(const uint8_t*, size_t) override { return false; }
 };
-class ProbeApp : public gw::AppPort {};
+class ProbeApp : public gw::AppPort {
+ public:
+  void onMessage(uint32_t, uint32_t, const std::vector<uint8_t>&) override {}
+};
 ProbeRadio radio;
 ProbeApp app;
 gw::Config config;
