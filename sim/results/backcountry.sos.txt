@@ -6,7 +6,7 @@ backcountry  flood7               pdr=0.590 pdr60=0.570 lat_med=    2.6s air/msg
     SOS -> any fixed node: reached 60/60 (100 %), <=60 s 55/60, median 1 s, p90 5 s, max 2101 s; SOS airtime 769 s/run
     reach times (s): [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 5, 5, 5, 300, 301, 301, 602, 2101]
     kinds (seed 1): {'pos': 6378, 'data': 3547, 'ack': 1155, 'sos': 1824}
-backcountry  ghostwave            pdr=0.985 pdr60=0.540 lat_med=   35.6s air/msg= 34.47s util=0.750 tx=18634 lost=12705
-    SOS -> any fixed node: reached 60/60 (100 %), <=60 s 52/60, median 1 s, p90 131 s, max 1501 s; SOS airtime 1480 s/run
-    reach times (s): [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 4, 5, 5, 10, 77, 131, 245, 246, 300, 302, 602, 1501]
-    kinds (seed 1): {'beacon': 2987, 'data': 8856, 'lack': 1374, 'ack': 2252, 'sos': 3645}
+backcountry  ghostwave            pdr=0.983 pdr60=0.528 lat_med=   39.9s air/msg= 34.73s util=0.754 tx=18716 lost=12862
+    SOS -> any fixed node: reached 60/60 (100 %), <=60 s 52/60, median 1 s, p90 100 s, max 2272 s; SOS airtime 1491 s/run
+    reach times (s): [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 8, 35, 48, 69, 100, 107, 112, 158, 221, 301, 2272]
+    kinds (seed 1): {'beacon': 2996, 'data': 9126, 'lack': 1363, 'ack': 2066, 'sos': 3759}

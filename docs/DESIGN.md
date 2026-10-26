@@ -136,6 +136,9 @@ UNICAST and add `dst_pos` en route. Everything else is authenticated end to end 
  13  11×n gossip         up to 3 entries: node ID (4) + pos (6) + age (1)
 ```
 
+A beacon is anycast (`next_hop = 0`), except when an SOS holder checks an offer it made: then
+`next_hop` is that neighbor, which answers with its own beacon (§8).
+
 The beacon's own position is in `fwd_pos`. Size with 3 gossip entries: 19 + 6 + 13 + 33 + 4 =
 **75 bytes**. (The simulator models 64 B; the 11 extra bytes don't change any conclusion.)
 
@@ -342,6 +345,26 @@ benefit**.
   cancelled if another holder offers first. A beacon carries `carrying_sos`. A node that sees it
   from a new neighbor beacons early (0.2–2 s later, ≥ 10 s since its last beacon), so the
   carrier gets the Bloom filter it needs without waiting up to 15 min.
+- **Lost offers are re-offered.** An offer is one frame, and a hidden terminal (a third node that
+  can't hear the offerer) can collide with it. A beacon from a *known* neighbor (heard within
+  20 min) that still carries no SOS (`carrying_sos` = 0) and whose Bloom filter lacks the seq
+  gets a re-offer: at least 60 s after the last offer, then 120, 240 and 480 s (capped at
+  15 min), and not within 60 s of the holder hearing the seq, while its scoped flood may still
+  get there. A neighbor that carries an SOS but is one seq behind isn't re-offered: relays
+  re-flood superseding seqs only every 15 min by design, and in simulation re-offering to those
+  neighbors tripled beacons and SOS frames.
+- **Probes.** A stationary neighbor beacons only every 15 min. So each offer to a neighbor
+  carrying no SOS, or offer held back by those gaps, schedules a **probe**: a beacon with
+  `next_hop` = that neighbor, sent when a re-offer becomes allowed plus up to 25 % jitter. The
+  neighbor answers with an early beacon (0.2–2 s, ≥ 10 s since its last). Probes stop after four
+  re-offers. They are dropped once the neighbor's filter has the seq, it carries an SOS, or it is
+  heard relaying ours. At most 8 are pending.
+- A node holding no SOS also beacons early for a *known* neighbor carrying SOS, once per distinct
+  Bloom filter it shows. This covers a carrier that left, picked up an SOS elsewhere and came
+  back within 20 min, which isn't "new" to anyone.
+- Before these rules, one lost offer, or a carrier returning to known neighbors, stalled the SOS
+  for 15–20 min. The 4-node UDP demo showed it in about 1 run in 8, and host tests now reproduce
+  both cases.
 - SOS jumps every transmit queue and bypasses fair-share budgets.
 - Any node marked `responder` (or a gateway) replies with `SOS_ACK` (type 0x07, scoped flood,
   payload = acked `seq`) to each new `seq`. Phones show a big "help acknowledged by X" banner.
@@ -509,16 +532,25 @@ Ablations (which pillar does the work):
 
 Each SOS starts at a random mobile node at a random time and is re-sent every 5 min until the end
 of the run. Metric: time until **any fixed node** holds it. flood* sends it as a plain hop-limited
-flood. Results in `sim/results/backcountry.sos.txt`.
+flood. Results in `sim/results/backcountry.sos.txt` (`--seeds 10 --kinds`).
 
 | Protocol | Reached | ≤ 60 s | Median | p90 | Worst | SOS airtime / run |
 |---|---|---|---|---|---|---|
 | flood (hop 3) | 100 % | 83 % | 1 s | 301 s | 3001 s | 455 s |
 | flood (hop 7) | 100 % | 92 % | 1 s | 5 s | 2101 s | 769 s |
-| **GhostWave** | 100 % | 87 % | 1 s | 131 s | **1501 s** | 1480 s |
+| **GhostWave** | 100 % | 87 % | 1 s | 100 s | 2272 s | 1491 s |
 
 Most SOS events reach a fixed node within seconds whatever the protocol. Against flood3, the epidemic store
-halves the p90 and the worst case. flood7's wider instant flood still wins the p90 at half the
+cuts the p90 to a third and the worst case by a quarter. flood7's wider instant flood still wins the p90 at half the
 airtime, so the SOS lane is **not yet a clear win** on this metric (§13 item 7). Its
 other job is getting the SOS to every node and keeping it there for 24 h. This metric doesn't
 measure that.
+
+Re-offers to known neighbors (§8) changed these numbers mostly by reshuffling the random
+stream: the probe jitter draws from the same RNG, so every seed plays out differently. Over 50
+seeds (300 events) they lifted reach within 60 s from 89.3 % to 90.0 % and within 300 s from
+93.0 % to 94.3 %, and cut the p90 from 83 s to 56 s. The tail beyond 15 min, where a carrier has
+to cross a partition, didn't change (worst case 1800 s before, 2272 s after). SOS airtime and
+beacon counts stayed within 1 %. A first version also re-offered to neighbors one seq behind,
+which tripled beacons and SOS frames, because relays re-flood superseding seqs only every
+15 min by design. The rule now applies only to neighbors carrying no SOS at all.

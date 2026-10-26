@@ -178,7 +178,11 @@ class Router {
   };
   using TxPtr = std::shared_ptr<TxItem>;
   struct LocEntry { Position pos; uint64_t obsMs; };
-  struct Neighbor { Position pos; uint64_t heardMs; };
+  struct Neighbor {
+    Position pos;
+    uint64_t heardMs;
+    uint64_t bloomAnswered;   // its Bloom filter we last answered with an early beacon
+  };
   struct Seen {
     uint64_t t = 0;
     int32_t custodyUp = -1;     // short id we took custody from
@@ -215,8 +219,9 @@ class Router {
     uint64_t relayMs;           // last time we re-flooded a seq from this originator
     TxPtr flood;                // pending scoped-flood rebroadcast
     uint8_t dups = 0;           // copies heard while that is pending
-    TxPtr offer;                // pending offer to a new neighbor
-    std::map<uint16_t, uint64_t> offered;   // neighbor -> last offer time
+    TxPtr offer;                // pending offer to a neighbor
+    struct Offered { uint64_t t; uint8_t tries; };   // last offer; re-offers since
+    std::map<uint16_t, Offered> offered;             // by neighbor
   };
 
   static Key keyOf(const Packet& p) { return {static_cast<uint8_t>(p.type), p.src, p.msgId}; }
@@ -244,12 +249,13 @@ class Router {
   bool storeReady(const StoreEntry& e, uint64_t now) const;
   void reattempt(const Key& k, uint64_t now);
   bool closerNeighbor(const Position& tgt, uint64_t maxAgeMs, uint64_t now) const;
-  void sendBeacon(uint64_t now);
+  void sendBeacon(uint64_t now, uint16_t to = 0);
   bool openData(const Packet& p, std::vector<uint8_t>& plain);
   void sendSosNow(uint64_t now);
   void onSos(const Packet& p, uint64_t now);
   void onSosAck(const Packet& p, uint64_t now);
-  void offerSos(uint32_t nbId, const uint8_t* bloom, uint64_t now);
+  bool offerSos(uint32_t nbId, const uint8_t* bloom, bool known, bool probe, uint64_t now);
+  void probeSos(uint16_t nb16, uint64_t at, uint64_t jitterMs);
   void sosTick(uint64_t now);
   bool storePeer(uint32_t id, const uint8_t xPub[32], bool pinned, uint64_t now);
   void sendIdent(uint32_t dst, uint64_t now);
@@ -308,6 +314,7 @@ class Router {
   std::map<uint32_t, uint64_t> identAsked_;   // neighbor -> last time we asked
 
   std::map<uint32_t, SosEntry> sos_;   // by originator; newest seq only
+  std::map<uint16_t, uint64_t> sosProbe_;   // neighbor we offered to -> when to ask for its beacon
   bool sosOn_ = false, sosEver_ = false;
   uint16_t sosSeq_ = 0;
   uint64_t sosLastTx_ = 0;

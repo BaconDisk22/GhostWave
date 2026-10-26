@@ -12,12 +12,11 @@
 # Usage: firmware/pi/tools/vmesh.sh [path/to/ghostwaved]
 # Env:   VMESH_PORT (default 47700), VMESH_IF (multicast interface address,
 #        e.g. 127.0.0.1), VMESH_KEEP=1 keeps the work dir, VMESH_VLOG=1 logs
-#        every frame each node hears, VMESH_TRIES (default 3) attempts.
+#        every frame each node hears.
 #
-# Retries: the virtual radio models hidden terminals, and now and then the
-# one SOS offer B makes to C is lost in a collision. The router does not
-# re-offer to a known neighbor for 15 min, so that attempt cannot pass in
-# time (exit 3). Only that case is retried; any other failure stops at once.
+# The virtual radio models hidden terminals, so B's SOS offer to C is now and
+# then lost in a collision; B probes C and re-offers about a minute later
+# (docs/DESIGN.md §8), well inside the wait below.
 set -u
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -27,18 +26,6 @@ if [ ! -x "$bin" ]; then
   echo "== building $bin (GHOSTWAVE_BUILD_VIRT=ON)"
   cmake -S "$fw" -B "$fw/build" -DGHOSTWAVE_BUILD_VIRT=ON >/dev/null &&
     cmake --build "$fw/build" --target ghostwaved --parallel >/dev/null || exit 1
-fi
-
-if [ -z "${VMESH_INNER:-}" ]; then
-  tries=${VMESH_TRIES:-3}
-  for (( try = 1; try <= tries; try++ )); do
-    [ $tries -gt 1 ] && echo "== attempt $try of $tries"
-    VMESH_INNER=1 "$0" "$bin"
-    rc=$?
-    [ $rc -ne 3 ] && exit $rc
-    echo "== attempt $try: SOS offer lost to a collision, not re-offered within the run (router gap)"
-  done
-  exit 1
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/vmesh.XXXXXX")
@@ -162,9 +149,17 @@ for n in $names; do last $n "^tx "; done
 say "A -> D: encrypted DM (D's position is known; nothing on A's side can reach it)"
 cmd A known $ID_D "$(lat_at 10.5)" $LON
 cmd A send $ID_D "$DM"
+# A's SOS sent right behind the DM can meet B's forward of the DM: neither has
+# sensed the other yet, and B, transmitting, misses it (half duplex)
+sleep 3
 say "A: SOS"
 cmd A sos "twisted ankle at the creek"
-wait_for 20 B "SOS from $ID_A" && say "B heard the SOS (and, as a responder, acked it)"
+if wait_for 20 B "SOS from $ID_A"; then
+  say "B heard the SOS (and, as a responder, acked it)"
+else
+  say "B missed A's SOS (collision); waiting for A's 5-min repeat"
+  wait_for 310 B "SOS from $ID_A" && say "B heard the repeat"
+fi
 sleep 8
 cmd B stats
 sleep 1
@@ -180,8 +175,9 @@ say "B is at 8 km: 1 km from C, 2.5 km from D, 8 km from A"
 
 ok=1
 wait_for 150 D "MSG from $ID_A" || ok=0
-wait_for 30 D "SOS from $ID_A" || ok=0
-wait_for 5 C "SOS from $ID_A" || ok=0
+# usually seconds; a lost offer is re-offered after 60-75 s plus a beacon exchange
+wait_for 150 D "SOS from $ID_A" || ok=0
+wait_for 30 C "SOS from $ID_A" || ok=0
 for n in $names; do cmd $n stats; done
 sleep 1
 
@@ -218,5 +214,4 @@ has D "MSG from" || say "FAIL: D never got the DM"
 has D "SOS from" || say "FAIL: D never got the SOS"
 has C "SOS from" || say "FAIL: C never got the SOS"
 VMESH_KEEP=1
-has D "MSG from" && exit 3   # only the SOS was stuck: see "Retries" above
 exit 1
