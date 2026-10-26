@@ -386,6 +386,13 @@ void Router::serviceMac(uint64_t now) {
     ++stats_.tx;
     stats_.airMs += dur;
   }
+  // A queued SOS has not had a chance to be echoed yet. Start each echo
+  // window at the radio attempt, including retries. A failed transmit still
+  // needs a bounded retry; merely waiting behind CSMA must not consume one.
+  if (best == sosOwnTx_ && sosOn_ && !sosEcho_ && sosResends_ < kSosResendMax) {
+    uint64_t wait = kSosEchoWaitMs << sosResends_;
+    sosResendAt_ = now + wait + rng_.range(0, kSosEchoJitterMs);
+  }
   macBackoffUntil_ = now + dur;   // radio is half duplex
 }
 
@@ -908,7 +915,7 @@ void Router::sendSosNow(uint64_t now) {
   // until a neighbor is heard relaying one of our seqs, a lost frame (the only
   // neighbor was transmitting) would cost a whole sosRepeatMs: re-send early
   sosResends_ = 0;
-  sosResendAt_ = sosEcho_ ? 0 : now + kSosEchoWaitMs + rng_.range(0, kSosEchoJitterMs);
+  sosResendAt_ = 0;   // armed by the radio attempt, not enqueue time
 }
 
 // Early re-send of our current seq (DESIGN §8): only while no copy of any seq
@@ -921,11 +928,6 @@ void Router::sosResendTick(uint64_t now) {
     sosResendAt_ = 0;
     return;
   }
-  uint64_t wait = kSosEchoWaitMs << (sosResends_ + 1);
-  if (sosOwnTx_ && !sosOwnTx_->sent && !sosOwnTx_->cancelled) {
-    sosResendAt_ = now + kSosEchoWaitMs;   // still queued (busy channel): wait from when it goes out
-    return;
-  }
   Packet g = it->second.pkt;   // same seq and msg_id: holders take it as a duplicate
   g.hopsLeft = cfg_.hopLimit;
   g.prevHop = me16();
@@ -933,7 +935,7 @@ void Router::sosResendTick(uint64_t now) {
   sosOwnTx_ = enqueue(g, true, now);
   ++sosResends_;
   ++stats_.sosTx;
-  sosResendAt_ = sosResends_ < kSosResendMax ? now + wait + rng_.range(0, kSosEchoJitterMs) : 0;
+  sosResendAt_ = 0;   // the next echo window starts when this retry transmits
 }
 
 bool Router::hasSos(uint32_t src, uint16_t* seq) const {

@@ -253,7 +253,9 @@ struct Medium;
 struct TestRadio : RadioPort {
   Medium* m;
   int idx;
-  bool channelBusy() override { return false; }
+  bool busy = false;
+  unsigned failSos = 0;
+  bool channelBusy() override { return busy; }
   bool transmit(const uint8_t* buf, size_t len) override;
 };
 
@@ -340,6 +342,11 @@ struct Medium {
 };
 
 bool TestRadio::transmit(const uint8_t* buf, size_t len) {
+  Packet p;
+  if (failSos && decode(buf, len, p) && p.type == PType::Sos) {
+    --failSos;
+    return false;
+  }
   m->deliver(idx, buf, len);
   return true;
 }
@@ -658,6 +665,76 @@ static void testSosEarlyResend() {
     m.run(4 * 60 * 1000);
     CHECK(ownFrames(m) == 3);
   }
+}
+
+static void testSosBusyChannel() {
+  std::printf("router: SOS echo waits start at transmission, including a queued retry\n");
+  Medium m;
+  auto& a = m.add(600, 0);
+  m.add(601, 2);
+  m.run(5000);   // learn a fresh neighbor before holding the originator's channel busy
+  std::vector<uint64_t> sent;
+  std::vector<Packet> packets;
+  m.drop = [&](int from, const uint8_t* buf, size_t len) {
+    Packet p;
+    if (from != a.radio.idx || !decode(buf, len, p) || p.type != PType::Sos) return false;
+    sent.push_back(m.now);
+    packets.push_back(p);
+    return true;   // no echo: exercise both early retries
+  };
+  a.radio.busy = true;
+  CHECK(a.router->startSos("busy channel", 40, 3, m.now));
+  m.run(44990);
+  CHECK(sent.empty());
+  CHECK(a.router->stats().sosTx == 1);   // no retries queued while the first frame waits
+  a.radio.busy = false;
+  while (sent.empty() && m.now < 52000) m.run(10);
+  CHECK(sent.size() == 1);
+  if (sent.empty()) return;
+  const uint64_t first = sent[0];
+  m.run(14000);
+  CHECK(sent.size() == 1);              // a full 15 s minimum after it actually left
+  // Hold the first retry in the queue past its next nominal echo deadline.
+  a.radio.busy = true;
+  m.run(45000);
+  CHECK(sent.size() == 1);
+  CHECK(a.router->stats().sosTx == 2);   // exactly one pending retry
+  a.radio.busy = false;
+  const uint64_t released = m.now;
+  while (sent.size() < 2 && m.now - released < 2000) m.run(10);
+  CHECK(sent.size() == 2);
+  if (sent.size() < 2) return;
+  CHECK(sent[1] - first >= 15000);
+  const uint64_t retry = sent[1];
+  m.run(29980);
+  CHECK(sent.size() == 2);              // second echo wait is a full 30 s after retry TX
+  while (sent.size() < 3 && m.now - retry < 36000) m.run(10);
+  CHECK(sent.size() == 3);
+  if (sent.size() < 3) return;
+  CHECK(sent[2] - retry >= 30000 && sent[2] - retry <= 36000);
+  for (const auto& p : packets) {
+    CHECK(p.msgId == packets[0].msgId);
+    CHECK(p.payload == packets[0].payload);   // retries keep the same SOS sequence and body
+  }
+  m.run(60000);
+  CHECK(sent.size() == 3);              // still bounded to two early retries
+}
+
+static void testSosRadioFailure() {
+  std::printf("router: a failed radio transmit still gets a bounded SOS retry\n");
+  Medium m;
+  auto& a = m.add(600, 0);
+  auto& b = m.add(601, 2);
+  m.run(5000);
+  a.radio.failSos = 1;
+  CHECK(a.router->startSos("radio failure", 40, 3, m.now));
+  m.run(5000);
+  CHECK(a.radio.failSos == 0 && !b.router->hasSos(600));
+  m.run(25000);
+  CHECK(b.router->hasSos(600));
+  CHECK(a.router->stats().sosTx == 2);
+  m.run(60000);
+  CHECK(a.router->stats().sosTx == 2);   // the neighbor's echo stops further retries
 }
 
 // ------------------------------------------------------------------- IDENT --
@@ -1030,7 +1107,9 @@ static void testVirtualChannel() {
 static void testTableCaps() {
   std::printf("router: seen / neighbor table caps\n");
   struct NullRadio : RadioPort {
-    bool channelBusy() override { return false; }
+    bool busy = false;
+  unsigned failSos = 0;
+  bool channelBusy() override { return busy; }
     bool transmit(const uint8_t*, size_t) override { return true; }
   } radio;
   struct NullApp : AppPort {
@@ -1088,6 +1167,8 @@ int main() {
   testSosLostOffer();
   testSosKnownNeighbor();
   testSosEarlyResend();
+  testSosBusyChannel();
+  testSosRadioFailure();
   testIdentCrypto();
   testIdentExchange();
   testIdentRequest();
