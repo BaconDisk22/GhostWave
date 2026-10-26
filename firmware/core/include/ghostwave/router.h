@@ -146,7 +146,8 @@ class Router {
   uint32_t send(uint32_t dst, const std::vector<uint8_t>& payload, uint64_t nowMs);
 
   // SOS lane (DESIGN §8). Sends now and re-sends every sosRepeatMs with the
-  // current position and a new seq. Calling again updates the body. Returns
+  // current position and a new seq; re-sends a seq early (up to twice, ~15 s
+  // and ~45 s on) while no neighbor has been heard relaying any of ours. Calling again updates the body. Returns
   // false when rate limited (sosMinGapMs since the last origination).
   bool startSos(const std::string& text, uint8_t batteryPct, uint8_t accuracy4m, uint64_t nowMs);
   void stopSos() { sosOn_ = false; }
@@ -257,6 +258,7 @@ class Router {
   bool offerSos(uint32_t nbId, const uint8_t* bloom, bool known, bool probe, uint64_t now);
   void probeSos(uint16_t nb16, uint64_t at, uint64_t jitterMs);
   void sosTick(uint64_t now);
+  void sosResendTick(uint64_t now);
   bool storePeer(uint32_t id, const uint8_t xPub[32], bool pinned, uint64_t now);
   void sendIdent(uint32_t dst, uint64_t now);
   void onIdent(const Packet& p, uint64_t now);
@@ -318,6 +320,10 @@ class Router {
   bool sosOn_ = false, sosEver_ = false;
   uint16_t sosSeq_ = 0;
   uint64_t sosLastTx_ = 0;
+  bool sosEcho_ = false;        // heard a neighbor relay (or carry) one of our seqs since startSos
+  uint8_t sosResends_ = 0;      // early re-sends of the current seq
+  uint64_t sosResendAt_ = 0;    // 0 = none due
+  TxPtr sosOwnTx_;              // our latest own SOS frame
   std::string sosText_;
   uint8_t sosBattery_ = 0xFF, sosAccuracy_ = 0xFF;
 };

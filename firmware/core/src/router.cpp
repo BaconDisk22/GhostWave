@@ -33,6 +33,9 @@ constexpr size_t kSosProbeCapacity = 8;
 constexpr uint64_t kSosRelayGapMs = 15 * 60 * 1000;   // re-flood a superseding seq at most this often
 constexpr uint64_t kBeaconReplyMinMs = 10 * 1000;
 constexpr uint8_t kSosDupCancel = 2;  // counter-based flood suppression
+constexpr uint64_t kSosEchoWaitMs = 15 * 1000;   // re-send our SOS if no relay is heard by then
+constexpr uint32_t kSosEchoJitterMs = 5 * 1000;
+constexpr uint8_t kSosResendMax = 2;             // early re-sends per seq: after ~15 s, then ~30 s more
 
 double clampd(double x, double lo, double hi) { return x < lo ? lo : x > hi ? hi : x; }
 
@@ -611,6 +614,10 @@ void Router::onBeacon(const Packet& p, uint64_t now) {
   bool isNew = old == nb_.end() || now - old->second.heardMs >= kNbFreshMs;
   const uint8_t* bloom = p.payload.size() >= kBeaconFixed ? p.payload.data() + kBloomOff : nullptr;
   bool carrier = !p.payload.empty() && (p.payload[0] & kBeaconSos);
+  if (carrier && bloom && sosOn_) {   // it holds our current seq: as good as hearing a relay
+    auto own = sos_.find(cfg_.nodeId);
+    if (own != sos_.end() && bloomHas(bloom, cfg_.nodeId, own->second.pkt.msgId)) sosEcho_ = true;
+  }
   // a known neighbor that still carries no SOS at all missed what we hold (a
   // lost offer, or we picked it up since): re-offer with backoff (DESIGN §8).
   // One that is merely behind by a seq is left to the relay gap.
@@ -864,6 +871,7 @@ bool Router::startSos(const std::string& text, uint8_t battery, uint8_t accuracy
   sosText_ = text.substr(0, kSosTextMax);
   sosBattery_ = battery;
   sosAccuracy_ = accuracy;
+  if (!sosOn_) sosEcho_ = false;
   sosOn_ = true;
   sendSosNow(now);
   return true;
@@ -895,8 +903,37 @@ void Router::sendSosNow(uint64_t now) {
   if (e.offer) e.offer->cancelled = true;
   auto offered = std::move(e.offered);
   e = SosEntry{p, sosSeq_, now, now, nullptr, 0, nullptr, std::move(offered)};
-  enqueue(p, true, now);   // prio 2: jumps the queue, bypasses the fair-share budget
+  sosOwnTx_ = enqueue(p, true, now);   // prio 2: jumps the queue, bypasses the fair-share budget
   ++stats_.sosTx;
+  // until a neighbor is heard relaying one of our seqs, a lost frame (the only
+  // neighbor was transmitting) would cost a whole sosRepeatMs: re-send early
+  sosResends_ = 0;
+  sosResendAt_ = sosEcho_ ? 0 : now + kSosEchoWaitMs + rng_.range(0, kSosEchoJitterMs);
+}
+
+// Early re-send of our current seq (DESIGN §8): only while no copy of any seq
+// of ours has been heard back, only with a fresh neighbor that could relay it,
+// and at most kSosResendMax times per seq, waiting twice as long each time.
+void Router::sosResendTick(uint64_t now) {
+  if (!sosResendAt_ || now < sosResendAt_) return;
+  auto it = sos_.find(cfg_.nodeId);
+  if (!sosOn_ || sosEcho_ || it == sos_.end() || sosResends_ >= kSosResendMax || neighborCount(now) == 0) {
+    sosResendAt_ = 0;
+    return;
+  }
+  uint64_t wait = kSosEchoWaitMs << (sosResends_ + 1);
+  if (sosOwnTx_ && !sosOwnTx_->sent && !sosOwnTx_->cancelled) {
+    sosResendAt_ = now + kSosEchoWaitMs;   // still queued (busy channel): wait from when it goes out
+    return;
+  }
+  Packet g = it->second.pkt;   // same seq and msg_id: holders take it as a duplicate
+  g.hopsLeft = cfg_.hopLimit;
+  g.prevHop = me16();
+  g.nextHop = 0;
+  sosOwnTx_ = enqueue(g, true, now);
+  ++sosResends_;
+  ++stats_.sosTx;
+  sosResendAt_ = sosResends_ < kSosResendMax ? now + wait + rng_.range(0, kSosEchoJitterMs) : 0;
 }
 
 bool Router::hasSos(uint32_t src, uint16_t* seq) const {
@@ -907,8 +944,12 @@ bool Router::hasSos(uint32_t src, uint16_t* seq) const {
 }
 
 void Router::onSos(const Packet& p, uint64_t now) {
-  if (p.src == cfg_.nodeId || p.payload.size() < kSosHeader || p.encrypted) return;
+  if (p.payload.size() < kSosHeader || p.encrypted) return;
   uint16_t seq = static_cast<uint16_t>(p.payload[0] | (p.payload[1] << 8));
+  if (p.src == cfg_.nodeId) {
+    if (sosOn_ && seq == sosSeq_) sosEcho_ = true;   // a neighbor relayed or offered it
+    return;
+  }
   auto it = sos_.find(p.src);
   if (it != sos_.end() && !seqNewer(seq, it->second.seq)) {
     SosEntry& e = it->second;
@@ -1058,6 +1099,7 @@ void Router::probeSos(uint16_t nb16, uint64_t at, uint64_t jitterMs) {
 
 void Router::sosTick(uint64_t now) {
   if (sosOn_ && now - sosLastTx_ >= cfg_.sosRepeatMs) sendSosNow(now);
+  sosResendTick(now);
   if (sos_.empty()) sosProbe_.clear();
   // one probe per beacon gap; the others wait their turn
   for (auto it = sosProbe_.begin(); it != sosProbe_.end(); ++it) {

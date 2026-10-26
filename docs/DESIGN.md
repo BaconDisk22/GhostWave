@@ -365,6 +365,19 @@ benefit**.
 - Before these rules, one lost offer, or a carrier returning to known neighbors, stalled the SOS
   for 15–20 min. The 4-node UDP demo showed it in about 1 run in 8, and host tests now reproduce
   both cases.
+- **Early re-send by the originator.** The originator's first frame of a seq is the only copy
+  until someone relays it, and a half-duplex neighbor that is transmitting at that moment (say,
+  forwarding a DM the originator just sent) misses it. Without this rule, nobody got the SOS
+  until the 5-min repeat. So after sending a seq, if the originator has a fresh neighbor (heard
+  within 20 min) and hears no copy of that seq (same `src`/`seq`, any `prev_hop`: a relay or an
+  offer), and no neighbor beacon whose Bloom filter holds it, within 15 s plus 0–5 s jitter, it
+  re-sends the same frame (same `seq` and `msg_id`, so holders drop it as a duplicate). If there's
+  still no echo, it re-sends once more 30 s (+ jitter) later, for at most two early re-sends per
+  seq. The 15 s wait starts when the frame actually leaves the queue. Once any of its seqs has
+  been heard back, the rule is off until `stopSos`/`startSos`. At that point a neighbor holds the
+  SOS, and a later seq that is lost only leaves a stale position until the next repeat. Relays
+  don't re-flood superseding seqs within 15 min anyway, so their silence would mean nothing.
+  With no fresh neighbor there's nothing to re-send to, and a newcomer gets an offer instead.
 - SOS jumps every transmit queue and bypasses fair-share budgets.
 - Any node marked `responder` (or a gateway) replies with `SOS_ACK` (type 0x07, scoped flood,
   payload = acked `seq`) to each new `seq`. Phones show a big "help acknowledged by X" banner.
@@ -554,3 +567,11 @@ to cross a partition, didn't change (worst case 1800 s before, 2272 s after). SO
 beacon counts stayed within 1 %. A first version also re-offered to neighbors one seq behind,
 which tripled beacons and SOS frames, because relays re-flood superseding seqs only every
 15 min by design. The rule now applies only to neighbors carrying no SOS at all.
+
+The originator's early re-send (§8), over the same 50 seeds (`SOS_RESEND_MAX` 0 vs 2, every
+other rule unchanged): reach within 60 s rose from 90.0 % to 95.0 % (within 30 s from 88.7 % to
+94.3 %), and the p90 fell from 56 s to 16 s. The worst case is still a partition crossing (2272 s
+before, 1904 s after). SOS airtime rose 1.1 % (1428 to 1444 s per run) and total frames 0.02 %. On
+`trail` (dense, 50 seeds) every event already arrives within 4 s, and nothing changed beyond
+noise (SOS airtime −0.3 %). As above, part of any difference comes from the reshuffled RNG
+stream.

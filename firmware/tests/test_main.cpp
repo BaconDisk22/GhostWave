@@ -591,6 +591,75 @@ static void testSosKnownNeighbor() {
   CHECK(m.now - met <= 2 * 60 * 1000);
 }
 
+static void testSosEarlyResend() {
+  std::printf("router: an SOS originator re-sends early when no neighbor relays its first frame\n");
+  auto ownFrames = [](Medium& m) {   // SOS frames sent by 600 itself
+    uint32_t n = 0;
+    for (auto& f : m.frames) {
+      Packet p;
+      n += decode(f.data(), f.size(), p) && p.type == PType::Sos && p.src == 600 && p.prevHop == shortId(600);
+    }
+    return n;
+  };
+  {   // the first frame is lost at the only neighbor (it was transmitting)
+    Medium m;
+    auto& a = m.add(600, 0);
+    auto& b = m.add(601, 2);
+    int ai = a.radio.idx;
+    int lost = 0;
+    m.drop = [&](int from, const uint8_t* buf, size_t len) {
+      Packet p;
+      if (from != ai || lost || !decode(buf, len, p) || p.type != PType::Sos) return false;
+      ++lost;
+      return true;
+    };
+    m.run(5000);                                // beacons: a knows b
+    CHECK(a.router->startSos("broken leg", 40, 3, m.now));
+    uint64_t t0 = m.now;
+    m.run(5000);
+    CHECK(lost == 1 && !b.router->hasSos(600));
+    while (!b.router->hasSos(600) && m.now - t0 < 5 * 60 * 1000) m.run(500);
+    uint16_t seq = 0;
+    CHECK(b.router->hasSos(600, &seq) && seq == 1);
+    CHECK(m.now - t0 <= 30 * 1000);             // was 5 min (the next repeat)
+    m.run(2 * 60 * 1000);
+    CHECK(ownFrames(m) == 2);                   // b's relay stops further re-sends
+    m.run(10 * 60 * 1000);
+    CHECK(ownFrames(m) == 4);                   // the 5-min repeats only: echo heard once is enough
+  }
+  {   // first frame heard and relayed: no re-send
+    Medium m;
+    auto& a = m.add(600, 0);
+    m.add(601, 2);
+    m.run(5000);
+    CHECK(a.router->startSos("broken leg", 40, 3, m.now));
+    m.run(2 * 60 * 1000);
+    CHECK(ownFrames(m) == 1);
+  }
+  {   // nobody around: nothing to re-send to (a newcomer gets an offer instead)
+    Medium m;
+    auto& a = m.add(600, 0);
+    m.run(5000);
+    CHECK(a.router->startSos("broken leg", 40, 3, m.now));
+    m.run(2 * 60 * 1000);
+    CHECK(ownFrames(m) == 1);
+  }
+  {   // every frame lost: two early re-sends per seq, then the 5-min repeat
+    Medium m;
+    auto& a = m.add(600, 0);
+    int ai = a.radio.idx;
+    m.add(601, 2);
+    m.drop = [&](int from, const uint8_t* buf, size_t len) {
+      Packet p;
+      return from == ai && decode(buf, len, p) && p.type == PType::Sos;
+    };
+    m.run(5000);
+    CHECK(a.router->startSos("broken leg", 40, 3, m.now));
+    m.run(4 * 60 * 1000);
+    CHECK(ownFrames(m) == 3);
+  }
+}
+
 // ------------------------------------------------------------------- IDENT --
 
 static void hexTo(const char* hex, uint8_t* out, size_t n) {
@@ -1018,6 +1087,7 @@ int main() {
   testSosPartitionedChain();
   testSosLostOffer();
   testSosKnownNeighbor();
+  testSosEarlyResend();
   testIdentCrypto();
   testIdentExchange();
   testIdentRequest();
