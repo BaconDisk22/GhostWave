@@ -34,6 +34,12 @@ if(GHOSTWAVE_BUILD_TESTS)
   target_link_libraries(ghostwave_tests ghostwave_core monocypher)
   target_compile_options(ghostwave_tests PRIVATE -Wall -Wextra)
   add_test(NAME ghostwave_tests COMMAND ghostwave_tests)
+  # the virtual radio's channel model and repeat filter (pi/vchannel.*): no sockets
+  add_executable(ghostwave_vchannel_tests tests/test_vchannel.cpp pi/vchannel.cpp)
+  target_include_directories(ghostwave_vchannel_tests PRIVATE pi)
+  target_link_libraries(ghostwave_vchannel_tests ghostwave_core)
+  target_compile_options(ghostwave_vchannel_tests PRIVATE -Wall -Wextra)
+  add_test(NAME ghostwave_vchannel_tests COMMAND ghostwave_vchannel_tests)
 endif()
 
 # ghostwaved always has the UDP virtual radio; GHOSTWAVE_BUILD_PI adds the E22P HAT.

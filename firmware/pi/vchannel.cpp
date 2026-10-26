@@ -101,4 +101,12 @@ size_t VirtualChannel::receive(uint8_t* out, size_t cap, float& rssiDbm, uint64_
   return best->len;
 }
 
+bool RepeatFilter::repeat(uint32_t src, uint32_t seq) {
+  for (const Entry& e : recent_)
+    if (e.used && e.src == src && e.seq == seq) return true;
+  recent_[next_] = {true, src, seq};
+  next_ = (next_ + 1) % kSize;
+  return false;
+}
+
 }  // namespace gw

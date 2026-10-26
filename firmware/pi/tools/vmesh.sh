@@ -6,7 +6,8 @@
 # The chain is partitioned: nothing in {A, B} can hear {C, D}. B is a hiker
 # whose position comes from a fake NMEA file. A sends an encrypted DM to D
 # and raises an SOS; B picks both up, walks to 8 km, and carries them over
-# the gap. The script passes when D prints the DM and both C and D hold the SOS.
+# the gap. The script passes when D prints the DM and both C and D hold the SOS,
+# and a sniffer on the multicast group never saw the DM text in clear.
 #
 # Usage: firmware/pi/tools/vmesh.sh [path/to/ghostwaved]
 # Env:   VMESH_PORT (default 47700), VMESH_IF (multicast interface address,
@@ -62,12 +63,13 @@ gga() {
   printf '$%s*%02X\r\n' "$body" "$sum"
 }
 
-# start NAME ID KM [extra args...]   (KM "nmea" = position from $work/NAME.nmea)
+# start NAME KM [extra args...]   (KM "nmea" = position from $work/NAME.nmea)
+# The node ID comes from the Ed25519 identity the daemon generates on first run.
 fdnum=3
 start() {
-  local n=$1 id=$2 km=$3
-  shift 3
-  local args=(--radio udp --mcast "239.77.0.1:$port" --id "$id" --key "$work/$n.key")
+  local n=$1 km=$2
+  shift 2
+  local args=(--radio udp --mcast "239.77.0.1:$port" --key "$work/$n.key" --name "$n")
   [ -n "${VMESH_IF:-}" ] && args+=(--vif "$VMESH_IF")
   [ "${VMESH_VLOG:-0}" = 1 ] && args+=(--vlog)
   if [ "$km" = nmea ]; then args+=(--nmea "$work/$n.nmea"); else args+=(--lat "$(lat_at "$km")" --lon "$LON"); fi
@@ -96,21 +98,44 @@ wait_for() {   # wait_for SECONDS NAME PATTERN
 show() { grep -E "$2" "$work/$1.log" | sed "s/^/    $1: /"; }
 last() { grep -E "$2" "$work/$1.log" | tail -1 | sed "s/^/    $1: /"; }
 
-ID_A=0a000001 ID_B=0b000002 ID_C=0c000003 ID_D=0d000004
-
 say "work dir $work, group 239.77.0.1:$port"
+DM="hello D, sealed for you only"
+# Sniffer: every datagram on the group, appended raw to air.bin, so the
+# results can check what actually went over the air.
+sniff=0
+if command -v python3 >/dev/null; then
+  python3 - "$port" "$work/air.bin" "${VMESH_IF:-0.0.0.0}" <<'PY' &
+import socket, sys
+port, out, vif = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+if hasattr(socket, "SO_REUSEPORT"):
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+s.bind(("", port))
+s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+             socket.inet_aton("239.77.0.1") + socket.inet_aton(vif))
+with open(out, "ab", buffering=0) as f:
+    while True:
+        f.write(s.recv(512))
+PY
+  pids="$pids $!"
+  sniff=1
+fi
 gga "$(lat_at 1.5)" >"$work/B.nmea"
 # staggered, so the four start-up beacons do not all collide
-start A $ID_A 0; sleep 1
-start B $ID_B nmea --responder; sleep 1
-start C $ID_C 9; sleep 1
-start D $ID_D 10.5 --require-enc
+start A 0; sleep 1
+start B nmea --responder; sleep 1
+start C 9; sleep 1
+start D 10.5 --require-enc
 
 for n in $names; do
   wait_for 5 $n "^key " || { say "FAIL: $n did not start"; cat "$work/$n.log"; exit 1; }
 done
-pub_A=$(awk '/^key /{print substr($2,1,64); exit}' "$work/A.log")
-pub_D=$(awk '/^key /{print substr($2,1,64); exit}' "$work/D.log")
+node_id() { awk '/^ghostwaved node /{print $3; exit}' "$work/$1.log"; }
+ID_A=$(node_id A) ID_B=$(node_id B) ID_C=$(node_id C) ID_D=$(node_id D)
+say "node IDs (from each identity key): A $ID_A, B $ID_B, C $ID_C, D $ID_D"
+pub_A=$(awk '/^key ed25519 /{print substr($3,1,64); exit}' "$work/A.log")
+pub_D=$(awk '/^key ed25519 /{print substr($3,1,64); exit}' "$work/D.log")
 cmd A peer $ID_D "$pub_D"
 cmd D peer $ID_A "$pub_A"
 say "A and D swapped public keys; D refuses plaintext (--require-enc)"
@@ -123,7 +148,7 @@ for n in $names; do last $n "^tx "; done
 
 say "A -> D: encrypted DM (D's position is known; nothing on A's side can reach it)"
 cmd A known $ID_D "$(lat_at 10.5)" $LON
-cmd A send $ID_D "hello D, sealed for you only"
+cmd A send $ID_D "$DM"
 # A's SOS sent right behind the DM can meet B's forward of the DM: neither has
 # sensed the other yet, and B, transmitting, misses it (half duplex)
 sleep 3
@@ -164,6 +189,22 @@ show C "^SOS from"
 show D "^(MSG from|SOS from)"
 for n in $names; do last $n "^tx "; last $n "^vradio heard"; done
 echo "    (A gets no DELIVERED: D's receipt is stored on the far side until someone walks back)"
+if [ $sniff = 1 ]; then
+  if [ ! -s "$work/air.bin" ]; then
+    say "FAIL: the sniffer captured nothing"
+    VMESH_KEEP=1
+    exit 1
+  fi
+  if LC_ALL=C grep -q -a -F "$DM" "$work/air.bin"; then
+    say "FAIL: the DM text went over the air in clear"
+    VMESH_KEEP=1
+    exit 1
+  fi
+  say "sniffer: $(LC_ALL=C grep -a -o GWV1 "$work/air.bin" | wc -l | tr -d ' ') frames captured, DM text never in clear"
+  LC_ALL=C grep -q -a -F "twisted ankle" "$work/air.bin" && say "  (the SOS text is in clear, by design: DESIGN §8)"
+else
+  say "sniffer skipped: no python3"
+fi
 echo
 if [ $ok = 1 ]; then
   say "PASS: the encrypted DM reached D and the SOS reached C and D across the partition"

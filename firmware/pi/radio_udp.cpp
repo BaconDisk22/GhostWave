@@ -5,7 +5,8 @@
 // Datagram (little-endian):
 //   0  "GWV1"
 //   4  u32 sender node id
-//   8  u32 sender's datagram counter (a host may deliver one datagram twice)
+//   8  u32 sender's datagram counter (a host may deliver one datagram twice;
+//          see gw::RepeatFilter)
 //  12  i32 lat, i32 lon (1e-7 degrees)
 //  20  u8  flags (bit 0: position valid)
 //  21  i8  sender EIRP, dBm
@@ -90,15 +91,6 @@ class UdpRadio : public HostRadio {
     return m;
   }
 
-  // True if (src, count) was among the last kDedup datagrams; records it if not.
-  bool duplicate(uint32_t src, uint32_t count) {
-    for (const auto& e : recent_)
-      if (e.first == src && e.second == count) return true;
-    recent_[recentNext_] = {src, count};
-    recentNext_ = (recentNext_ + 1) % recent_.size();
-    return false;
-  }
-
   // Moves every waiting datagram onto the virtual air.
   void drain() {
     uint8_t d[kHeader + gw::kMaxFrame + 1];
@@ -110,7 +102,7 @@ class UdpRadio : public HostRadio {
       if (static_cast<size_t>(n) != kHeader + len) continue;
       uint32_t src = get32(d + 4);
       if (src == id_) continue;   // our own frame, looped back
-      if (duplicate(src, get32(d + 8))) continue;
+      if (repeats_.repeat(src, get32(d + 8))) continue;
       gw::Position tx{static_cast<int32_t>(get32(d + 12)) * 1e-7,
                       static_cast<int32_t>(get32(d + 16)) * 1e-7, (d[20] & 1) != 0};
       float txDbm = static_cast<int8_t>(d[21]);
@@ -130,9 +122,8 @@ class UdpRadio : public HostRadio {
   sockaddr_in group_;
   UdpOptions opt_;
   uint32_t id_;
-  uint32_t txCount_ = 0;
-  std::array<std::pair<uint32_t, uint32_t>, 32> recent_{};
-  size_t recentNext_ = 0;
+  uint32_t txCount_ = static_cast<uint32_t>(nowMs());   // a restarted daemon is not a repeat
+  gw::RepeatFilter repeats_;
   gw::Position pos_;
   gw::VirtualChannel chan_;
 };
