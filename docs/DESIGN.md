@@ -342,7 +342,8 @@ benefit**.
 - Every node that hears an SOS **stores it for 24 h** and offers it to every new neighbor it
   meets (one not heard for 20 min) whose beacon Bloom filter lacks that `(src, msg_id)`. An offer
   restarts the scoped flood (hops 15) in the neighbor's partition, after jitter, and is
-  cancelled if another holder offers first. A beacon carries `carrying_sos`. A node that sees it
+  cancelled if another holder offers first. Expiry is checked both during periodic cleanup
+  and when an SOS arrives, so an expired entry cannot suppress a newly received sequence. A beacon carries `carrying_sos`. A node that sees it
   from a new neighbor beacons early (0.2–2 s later, ≥ 10 s since its last beacon), so the
   carrier gets the Bloom filter it needs without waiting up to 15 min.
 - **Lost offers are re-offered.** An offer is one frame, and a hidden terminal (a third node that
