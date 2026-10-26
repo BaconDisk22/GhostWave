@@ -963,6 +963,14 @@ void Router::onSos(const Packet& p, uint64_t now) {
     return;
   }
   auto it = sos_.find(p.src);
+  // Reception can occur after the TTL but before sosTick has removed the
+  // entry. Expire it here too, so it cannot suppress a newly received SOS.
+  if (it != sos_.end() && now - it->second.heardMs > cfg_.sosTtlMs) {
+    if (it->second.flood) it->second.flood->cancelled = true;
+    if (it->second.offer) it->second.offer->cancelled = true;
+    sos_.erase(it);
+    it = sos_.end();
+  }
   if (it != sos_.end() && !seqNewer(seq, it->second.seq)) {
     SosEntry& e = it->second;
     if (seq == e.seq) {

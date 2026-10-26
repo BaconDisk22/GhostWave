@@ -869,6 +869,94 @@ static void testSosStopRestart() {
   }
 }
 
+static void testSosExpiryAndRollover() {
+  std::printf("router: SOS expiry, duplicate handling, and sequence rollover\n");
+  const uint64_t ttl = 24ull * 3600 * 1000;
+  auto inject = [](SimNode& n, uint16_t seq, uint32_t msgId, uint64_t now) {
+    Packet p;
+    p.type = PType::Sos;
+    p.mode = Mode::ScopedFlood;
+    p.prio = kPrioSos;
+    p.src = 600;
+    p.prevHop = shortId(600);
+    p.msgId = msgId;
+    p.hopsLeft = 3;
+    p.payload = {static_cast<uint8_t>(seq), static_cast<uint8_t>(seq >> 8), 3, 40};
+    uint8_t frame[kMaxFrame];
+    const size_t nbytes = encode(p, frame, sizeof frame);
+    CHECK(nbytes != 0);
+    if (nbytes) n.router->onReceive(frame, nbytes, -100, now);
+  };
+  {   // wrap forward; an old packet and the ambiguous half-range cannot replace it
+    Medium m;
+    auto& n = m.add(601, 0);
+    uint16_t held = 0;
+    inject(n, 65534, 1, 1000);
+    inject(n, 65535, 2, 2000);
+    inject(n, 0, 3, 3000);
+    inject(n, 1, 4, 4000);
+    CHECK(n.router->hasSos(600, &held) && held == 1);
+    CHECK(n.app.sos.size() == 4);
+    inject(n, 65535, 5, 5000);
+    inject(n, 32769, 6, 6000);  // exactly half the 16-bit sequence space
+    CHECK(n.router->hasSos(600, &held) && held == 1);
+    CHECK(n.app.sos.size() == 4);
+    inject(n, 2, 7, 7000);
+    CHECK(n.router->hasSos(600, &held) && held == 2);
+    CHECK(n.app.sos.size() == 5);
+  }
+  {   // duplicates do not extend the TTL; an expired pending flood cannot transmit
+    Medium m;
+    auto& n = m.add(601, 0);
+    n.radio.busy = true;
+    inject(n, 7, 20, 1000);
+    inject(n, 7, 20, 1000 + ttl - 1);
+    CHECK(n.app.sos.size() == 1);
+    n.router->tick(1000 + ttl);
+    CHECK(n.router->hasSos(600));  // current contract: expiry is strictly after TTL
+    n.router->tick(1001 + ttl);
+    CHECK(!n.router->hasSos(600));
+    n.radio.busy = false;
+    n.router->tick(1002 + ttl);
+    n.router->tick(2002 + ttl);
+    CHECK(m.count(PType::Sos) == 0);
+  }
+  {   // a newer sequence refreshes the stored lifetime
+    Medium m;
+    auto& n = m.add(601, 0);
+    inject(n, 7, 30, 1000);
+    inject(n, 8, 31, 1000 + ttl / 2);
+    n.router->tick(1001 + ttl);
+    uint16_t held = 0;
+    CHECK(n.router->hasSos(600, &held) && held == 8);
+    n.router->tick(1001 + ttl + ttl / 2);
+    CHECK(!n.router->hasSos(600));
+  }
+  {   // the next packet can arrive after expiry but before the next tick
+    Medium m;
+    auto& n = m.add(601, 0);
+    n.radio.busy = true;
+    inject(n, 7, 40, 1000);
+    inject(n, 7, 41, 1001 + ttl); // the same sequence must start a fresh stored entry
+    uint16_t held = 0;
+    CHECK(n.app.sos.size() == 2);
+    CHECK(n.router->hasSos(600, &held) && held == 7);
+    n.router->tick(1002 + ttl);
+    CHECK(n.router->hasSos(600, &held) && held == 7);
+    n.radio.busy = false;
+    n.router->tick(10000 + ttl);
+    n.router->tick(20000 + ttl);
+    unsigned fresh = 0, stale = 0;
+    for (const auto& frame : m.frames) {
+      Packet p;
+      if (!decode(frame.data(), frame.size(), p) || p.type != PType::Sos) continue;
+      fresh += p.msgId == 41;
+      stale += p.msgId == 40;
+    }
+    CHECK(fresh == 1 && stale == 0); // expired queued flood must stay cancelled
+  }
+}
+
 // ------------------------------------------------------------------- IDENT --
 
 static void hexTo(const char* hex, uint8_t* out, size_t n) {
@@ -1302,6 +1390,7 @@ int main() {
   testSosBusyChannel();
   testSosRadioFailure();
   testSosStopRestart();
+  testSosExpiryAndRollover();
   testIdentCrypto();
   testIdentExchange();
   testIdentRequest();
