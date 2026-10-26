@@ -884,7 +884,17 @@ bool Router::startSos(const std::string& text, uint8_t battery, uint8_t accuracy
   return true;
 }
 
+void Router::stopSos() {
+  sosOn_ = false;
+  sosResendAt_ = 0;
+  if (sosOwnTx_) sosOwnTx_->cancelled = true;
+  sosOwnTx_.reset();
+}
+
 void Router::sendSosNow(uint64_t now) {
+  // An update supersedes a queued original or retry, even when CSMA kept it
+  // waiting longer than the repeat interval. Never send the stale seq later.
+  if (sosOwnTx_) sosOwnTx_->cancelled = true;
   Packet p;
   p.type = PType::Sos;
   p.prio = kPrioSos;

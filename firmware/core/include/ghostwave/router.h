@@ -150,7 +150,8 @@ class Router {
   // and ~45 s on) while no neighbor has been heard relaying any of ours. Calling again updates the body. Returns
   // false when rate limited (sosMinGapMs since the last origination).
   bool startSos(const std::string& text, uint8_t batteryPct, uint8_t accuracy4m, uint64_t nowMs);
-  void stopSos() { sosOn_ = false; }
+  // Cancels pending origination/retries. Stored SOS remains available to carriers until TTL.
+  void stopSos();
   bool sosActive() const { return sosOn_; }
   // Send SOS_ACK for the SOS we hold from `sosSrc`. False if we hold none.
   bool ackSos(uint32_t sosSrc, uint64_t nowMs);

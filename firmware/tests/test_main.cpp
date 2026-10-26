@@ -737,6 +737,138 @@ static void testSosRadioFailure() {
   CHECK(a.router->stats().sosTx == 2);   // the neighbor's echo stops further retries
 }
 
+static void testSosStopRestart() {
+  std::printf("router: stopping and replacing SOS cancels queued originator frames\n");
+  auto ownPackets = [](const Medium& m) {
+    std::vector<Packet> out;
+    for (const auto& f : m.frames) {
+      Packet p;
+      if (decode(f.data(), f.size(), p) && p.type == PType::Sos &&
+          p.src == 600 && p.prevHop == shortId(600)) out.push_back(p);
+    }
+    return out;
+  };
+  {   // stop before the initial frame ever leaves a busy queue
+    Medium m;
+    auto& a = m.add(600, 0);
+    m.add(601, 2);
+    m.run(5000);
+    a.radio.busy = true;
+    CHECK(a.router->startSos("cancel queued SOS", 40, 3, m.now));
+    m.run(5000);
+    a.router->stopSos();
+    a.router->stopSos();   // idempotent
+    CHECK(!a.router->sosActive());
+    CHECK(a.router->hasSos(600));   // stop is not a network-wide recall; retain the stored seq
+    a.radio.busy = false;
+    m.run(120000);
+    CHECK(ownPackets(m).empty());
+  }
+  {   // stopping our own SOS must leave another originator's queued relay intact
+    Medium m;
+    auto& a = m.add(600, 0);
+    auto& b = m.add(601, 2);
+    m.run(5000);
+    a.radio.busy = true;
+    CHECK(b.router->startSos("neighbor needs help", 40, 3, m.now));
+    m.run(3000);
+    CHECK(a.router->hasSos(601));
+    CHECK(a.router->startSos("local session", 40, 3, m.now));
+    a.router->stopSos();
+    a.radio.busy = false;
+    m.run(5000);
+    CHECK(ownPackets(m).empty());
+    bool relayed = false;
+    for (const auto& f : m.frames) {
+      Packet p;
+      if (decode(f.data(), f.size(), p) && p.type == PType::Sos &&
+          p.src == 601 && p.prevHop == shortId(600)) relayed = true;
+    }
+    CHECK(relayed);
+  }
+  {   // stop with an early retry queued behind CSMA
+    Medium m;
+    auto& a = m.add(600, 0);
+    m.add(601, 2);
+    m.drop = [&](int from, const uint8_t* buf, size_t len) {
+      Packet p;
+      return from == a.radio.idx && decode(buf, len, p) && p.type == PType::Sos;
+    };
+    m.run(5000);
+    CHECK(a.router->startSos("cancel retry", 40, 3, m.now));
+    m.run(5000);
+    CHECK(ownPackets(m).size() == 1);
+    a.radio.busy = true;
+    m.run(25000);
+    CHECK(a.router->stats().sosTx == 2);   // a retry was enqueued
+    a.router->stopSos();
+    a.radio.busy = false;
+    m.run(120000);
+    CHECK(ownPackets(m).size() == 1);
+  }
+  for (bool stopFirst : {false, true}) {   // update an active SOS, or stop then restart
+    Medium m;
+    auto& a = m.add(600, 0);
+    m.add(601, 2);
+    m.run(5000);
+    a.radio.busy = true;
+    CHECK(a.router->startSos("old body", 40, 3, m.now));
+    if (stopFirst) a.router->stopSos();
+    CHECK(!a.router->startSos("too soon", 40, 3, m.now + 1));
+    CHECK(a.router->sosActive() == !stopFirst);   // rate-limited start must not change state
+    m.run(60000);
+    CHECK(a.router->startSos("new body", 80, 5, m.now));
+    a.radio.busy = false;
+    m.run(5000);
+    auto packets = ownPackets(m);
+    CHECK(packets.size() == 1);
+    for (const auto& p : packets) {
+      CHECK(p.payload.size() >= 4 && p.payload[0] == 2 && p.payload[1] == 0);
+      CHECK(p.payload[2] == 5 && p.payload[3] == 80);
+      CHECK(std::string(p.payload.begin() + 4, p.payload.end()) == "new body");
+    }
+  }
+  {   // a previous session's echo must not suppress retries after a restart
+    Medium m;
+    auto& a = m.add(600, 0);
+    auto& b = m.add(601, 2);
+    m.run(5000);
+    CHECK(a.router->startSos("first session", 40, 3, m.now));
+    m.run(5000);   // B relays seq 1 and A hears the echo
+    CHECK(b.router->hasSos(600));
+    a.router->stopSos();
+    m.run(60000);
+    bool lost = false;
+    m.drop = [&](int from, const uint8_t* buf, size_t len) {
+      Packet p;
+      if (from != a.radio.idx || lost || !decode(buf, len, p) || p.type != PType::Sos) return false;
+      lost = true;
+      return true;
+    };
+    const size_t before = ownPackets(m).size();
+    CHECK(a.router->startSos("second session", 80, 5, m.now));
+    m.run(5000);
+    uint16_t seq = 0;
+    CHECK(lost && b.router->hasSos(600, &seq) && seq == 1);
+    m.run(25000);
+    CHECK(b.router->hasSos(600, &seq) && seq == 2);
+    CHECK(ownPackets(m).size() == before + 2);   // one failed first attempt, one early retry
+  }
+  {   // a five-minute refresh also supersedes an unsent older seq
+    Medium m;
+    auto& a = m.add(600, 0);
+    m.run(5000);
+    a.radio.busy = true;
+    CHECK(a.router->startSos("still active", 40, 3, m.now));
+    m.run(301000);
+    a.radio.busy = false;
+    m.run(5000);
+    auto packets = ownPackets(m);
+    CHECK(packets.size() == 1);
+    for (const auto& p : packets) CHECK(p.payload[0] == 2);
+  }
+}
+
 // ------------------------------------------------------------------- IDENT --
 
 static void hexTo(const char* hex, uint8_t* out, size_t n) {
@@ -1169,6 +1301,7 @@ int main() {
   testSosEarlyResend();
   testSosBusyChannel();
   testSosRadioFailure();
+  testSosStopRestart();
   testIdentCrypto();
   testIdentExchange();
   testIdentRequest();

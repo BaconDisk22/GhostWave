@@ -379,6 +379,12 @@ benefit**.
   SOS, and a later seq that is lost only leaves a stale position until the next repeat. Relays
   don't re-flood superseding seqs within 15 min anyway, so their silence would mean nothing.
   With no fresh neighbor there's nothing to re-send to, and a newcomer gets an offer instead.
+- **Stop and restart.** `stopSos` cancels the originator's queued original or early retry
+  and disables further periodic origination. An update or five-minute refresh also cancels
+  the previous queued originator frame before enqueueing the newer seq. Restarting after
+  a stop resets echo suppression; the existing 60 s origination rate limit still applies.
+  Stop is not a network-wide recall: stored SOS entries and carrier offers retain their
+  existing 24 h TTL, and relaying other originators' SOS is unaffected.
 - SOS jumps every transmit queue and bypasses fair-share budgets.
 - Any node marked `responder` (or a gateway) replies with `SOS_ACK` (type 0x07, scoped flood,
   payload = acked `seq`) to each new `seq`. Phones show a big "help acknowledged by X" banner.
