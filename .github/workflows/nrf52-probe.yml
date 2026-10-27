@@ -1,0 +1,28 @@
+name: nRF52 compile probe
+on:
+  push:
+    branches: [t1000e-port]
+  pull_request:
+    paths:
+      - 'firmware/t1000e/**'
+      - 'firmware/core/**'
+      - 'firmware/mcu/lib/**'
+      - 'firmware/third_party/monocypher/**'
+      - '.github/workflows/nrf52-probe.yml'
+permissions:
+  contents: read
+jobs:
+  compile-probe:
+    name: Compile GhostWave core for generic nRF52840 (not flashable)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Install PlatformIO
+        run: pip install platformio==6.2.0
+      - name: Compile probe
+        working-directory: firmware/t1000e
+        run: pio run -e nrf52840_compile_probe
