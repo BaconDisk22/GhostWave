@@ -98,13 +98,16 @@ bool McuRadio::transmit(const uint8_t* buf, size_t len) {
 }
 
 bool McuRadio::poll(uint8_t* buf, size_t cap, size_t& len, float& rssiDbm) {
-  if (!digitalRead(kPinLoraDio1)) return false;
-  len = g_sx.getPacketLength();
+  len = 0;
+  rssiDbm = 0;
+  if (!buf || cap == 0 || !digitalRead(kPinLoraDio1)) return false;
+  const size_t received = g_sx.getPacketLength();
   bool ok = false;
-  if (len > 0 && len <= cap) {
-    int16_t st = g_sx.readData(buf, len);
+  if (received > 0 && received <= cap) {
+    int16_t st = g_sx.readData(buf, received);
     if (st == RADIOLIB_ERR_NONE) {
       rssiDbm = g_sx.getRSSI();
+      len = received;
       ok = true;
     } else if (st == RADIOLIB_ERR_CRC_MISMATCH) {
       ++crcErrors_;
