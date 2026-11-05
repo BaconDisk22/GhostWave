@@ -16,7 +16,7 @@ int main() {
  mock.enabled=true; CHECK(!adapter.channelBusy());
  CHECK(!adapter.transmit(nullptr,1)); CHECK(!adapter.transmit(&data,0));
  CHECK(!adapter.transmit(&data,256)); CHECK(mock.calls==0);
- mock.occupied=true; CHECK(adapter.channelBusy()); mock.occupied=false;
+ mock.occupied=true; CHECK(adapter.channelBusy()); CHECK(!adapter.transmit(&data,1)); CHECK(mock.calls==0); mock.occupied=false;
  CHECK(!adapter.transmit(&data,1)); CHECK(mock.calls==1);
  mock.outcome=true; CHECK(adapter.transmit(&data,1)); CHECK(mock.calls==2);
  return 0;
