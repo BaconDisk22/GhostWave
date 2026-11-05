@@ -13,6 +13,27 @@ DATA payloads are end-to-end encrypted with ChaCha20-Poly1305 (X25519 DM keys or
 Status: **v0.1 prototype**. The design is in [docs/DESIGN.md](docs/DESIGN.md). Simulation results are in
 [DESIGN §14](docs/DESIGN.md#14-simulation-results-simghostsimpy-3-seeds-each).
 
+## Project status and visual previews
+
+GhostWave is an experimental, independent off-grid mesh protocol—not a Meshtastic or MeshCore firmware distribution. The project currently provides a portable C++ routing core, a Raspberry Pi daemon, ESP32-S3 Heltec firmware builds, and a four-node virtual-mesh demonstration.
+
+| Area | Current status |
+|---|---|
+| Portable protocol core and host tests | Automated builds and tests available |
+| Raspberry Pi daemon / UDP virtual radio | Builds and virtual-mesh demonstration available |
+| Heltec Wireless Tracker V2 / Heltec V3 | PlatformIO compile checks; physical radio operation not verified |
+| nRF52840 / RAK4631 / T1000-E | Not qualified as flash-ready GhostWave firmware |
+| Store-and-forward encrypted DM and SOS | Simulated, but intermittent SOS delivery failures are under investigation |
+| Hardware release | **Not ready**; hardware verification and release-readiness checks remain required |
+
+### Screenshots and demo output
+
+GhostWave is currently primarily a **command-line / serial-console** project, not a finished graphical app. There are no verified UI screenshots checked into this repository. We won't substitute mockups or claim simulator images are hardware screenshots.
+
+To see the working demonstration, run `firmware/pi/tools/vmesh.sh`. It prints the simulated four-node route, encrypted DM receipt, SOS forwarding, and per-node diagnostics. For debugging, run `VMESH_KEEP=1 VMESH_VLOG=1 firmware/pi/tools/vmesh.sh` and inspect the retained logs. The demo can fail intermittently when SOS does not reach every recipient; a passing run is not hardware qualification.
+
+**Screenshot contributions:** once a real console or UI session is captured, place the image in `docs/screenshots/` and add a labeled link here with the platform, build, and whether the capture is simulation or hardware. Do not include private keys, location data, or other secrets.
+
 ## Headline results (simulation)
 
 | | Meshtastic-like flood | MeshCore-like path-learning | GhostWave |
@@ -110,8 +131,7 @@ A (0 km) --- B (1.5 km)  . . . gap . . .  C (9 km) --- D (10.5 km)
 
 The script passes when D prints the decrypted DM and C and D both hold the SOS. A sniffer
 (python3) on the group also records every datagram, and the run fails if the DM text ever went over
-the air in clear. The SOS text is sent in clear by design. A run takes about
-70 s. A gets no `DELIVERED`, because D's receipt waits on the far side until someone walks back.
+the air in clear. The SOS text is sent in clear by design. Runtime varies; delivery checks may take several minutes, and intermittent SOS delivery failures remain under investigation. A gets no `DELIVERED`, because D's receipt waits on the far side until someone walks back.
 Env vars: `VMESH_VLOG=1` logs every frame, `VMESH_KEEP=1` keeps the logs, and `VMESH_IF` and
 `VMESH_PORT` choose the network.
 
