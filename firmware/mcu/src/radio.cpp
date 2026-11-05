@@ -82,10 +82,14 @@ bool McuRadio::channelBusy() {
   if (digitalRead(kPinLoraDio1)) return true;   // a frame is waiting to be read
   int16_t r = g_sx.scanChannel();                // CAD
   g_sx.startReceive();
-  return r == RADIOLIB_LORA_DETECTED;
+  return r != RADIOLIB_CHANNEL_FREE;
 }
 
 bool McuRadio::transmit(const uint8_t* buf, size_t len) {
+  if (!buf || len == 0 || len > 255) {
+    ++txErrors_;
+    return false;
+  }
   femTx();
   int16_t st = g_sx.transmit(buf, len);
   femRx();
