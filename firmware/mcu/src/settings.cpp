@@ -134,15 +134,14 @@ bool savePeer(Settings& s, uint32_t id, const Key32& pub) {
   if (id == 0 || id == kBroadcast) return false;
   size_t i = 0;
   while (i < s.peerCount && s.peers[i].id != id) ++i;
-  if (i == s.peerCount) {
-    if (s.peerCount == kMaxStoredPeers) return false;
-    ++s.peerCount;
-  }
+  const bool adding = i == s.peerCount;
+  if (adding && s.peerCount == kMaxStoredPeers) return false;
   const PeerKey previous = s.peers[i];
+  if (adding) ++s.peerCount;
   s.peers[i] = {id, pub};
   if (savePeers(s)) return true;
   s.peers[i] = previous;
-  if (i == s.peerCount - 1 && previous.id == 0) --s.peerCount;
+  if (adding) --s.peerCount;
   return false;
 }
 
