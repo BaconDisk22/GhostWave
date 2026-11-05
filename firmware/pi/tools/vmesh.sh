@@ -199,6 +199,10 @@ if ! grep -Eq '^fix 46\.94[0-9]+ -113\.990000' "$work/B.log"; then
 fi
 say "B is at 8 km: 1 km from C, 2.5 km from D, 8 km from A"
 
+say "relay diagnostic: B after walk"
+cmd B stats
+sleep 1
+last B "^tx "
 ok=1
 wait_for 150 D "MSG from $ID_A" || ok=0
 # usually seconds; a lost offer is re-offered after 60-75 s plus a beacon exchange
