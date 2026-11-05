@@ -1,0 +1,27 @@
+name: Probe safety
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Check generic nRF52840 probe is not labeled flashable
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('firmware/t1000e/platformio.ini').read_text()
+          s = Path('firmware/t1000e/src/main.cpp').read_text()
+          assert '[env:nrf52840_compile_probe]' in p, 'Compile probe environment missing'
+          assert 'adafruit_feather_nrf52840' in p, 'Unexpected board target: review hardware safety'
+          assert 'MUST NOT be flashed' in p, 'Missing non-flashable warning'
+          assert 'never flash' in s.lower(), 'Missing non-flashable source warning'
+          print('Compile-only probe safety markers verified; no firmware flashed.')
+          PY
