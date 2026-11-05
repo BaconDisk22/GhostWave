@@ -8,14 +8,16 @@ struct Mock : gw::Sx1262Driver {
  bool busy() override { return occupied; }
  bool send(const uint8_t*, size_t) override { ++calls; return outcome; }
 };
+#define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "SX1262 contract failed at line %d\n", __LINE__); return 1; } } while (false)
 int main() {
  Mock mock; gw::Sx1262Adapter adapter(mock); uint8_t data=42;
- if (!(adapter.channelBusy())) { std::fprintf(stderr, "SX1262 adapter contract failure at line %d\n", __LINE__); return 1; }
- if (!(!adapter.transmit(&data,1)); assert(mock.calls==0)) { std::fprintf(stderr, "SX1262 adapter contract failure at line %d\n", __LINE__); return 1; }
- mock.enabled=true; if (!(!adapter.channelBusy())) { std::fprintf(stderr, "SX1262 adapter contract failure at line %d\n", __LINE__); return 1; }
- if (!(!adapter.transmit(nullptr,1)); assert(!adapter.transmit(&data,0))) { std::fprintf(stderr, "SX1262 adapter contract failure at line %d\n", __LINE__); return 1; }
- if (!(!adapter.transmit(&data,256)); assert(mock.calls==0)) { std::fprintf(stderr, "SX1262 adapter contract failure at line %d\n", __LINE__); return 1; }
- mock.occupied=true; if (!(adapter.channelBusy())) { std::fprintf(stderr, "SX1262 adapter contract failure at line %d\n", __LINE__); return 1; } mock.occupied=false;
- if (!(!adapter.transmit(&data,1)); assert(mock.calls==1)) { std::fprintf(stderr, "SX1262 adapter contract failure at line %d\n", __LINE__); return 1; }
- mock.outcome=true; if (!(adapter.transmit(&data,1)); assert(mock.calls==2)) { std::fprintf(stderr, "SX1262 adapter contract failure at line %d\n", __LINE__); return 1; }
+ CHECK(adapter.channelBusy());
+ CHECK(!adapter.transmit(&data,1)); CHECK(mock.calls==0);
+ mock.enabled=true; CHECK(!adapter.channelBusy());
+ CHECK(!adapter.transmit(nullptr,1)); CHECK(!adapter.transmit(&data,0));
+ CHECK(!adapter.transmit(&data,256)); CHECK(mock.calls==0);
+ mock.occupied=true; CHECK(adapter.channelBusy()); mock.occupied=false;
+ CHECK(!adapter.transmit(&data,1)); CHECK(mock.calls==1);
+ mock.outcome=true; CHECK(adapter.transmit(&data,1)); CHECK(mock.calls==2);
+ return 0;
 }
