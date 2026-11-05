@@ -131,14 +131,19 @@ bool saveFlags(const Settings& s) {
 }
 
 bool savePeer(Settings& s, uint32_t id, const Key32& pub) {
+  if (id == 0 || id == kBroadcast) return false;
   size_t i = 0;
   while (i < s.peerCount && s.peers[i].id != id) ++i;
   if (i == s.peerCount) {
     if (s.peerCount == kMaxStoredPeers) return false;
     ++s.peerCount;
   }
+  const PeerKey previous = s.peers[i];
   s.peers[i] = {id, pub};
-  return savePeers(s);
+  if (savePeers(s)) return true;
+  s.peers[i] = previous;
+  if (i == s.peerCount - 1 && previous.id == 0) --s.peerCount;
+  return false;
 }
 
 }  // namespace mcu
