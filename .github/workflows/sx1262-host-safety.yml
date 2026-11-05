@@ -1,0 +1,25 @@
+name: SX1262 host safety
+on:
+  push:
+    paths:
+      - 'firmware/core/include/ghostwave/sx1262_adapter.h'
+      - 'firmware/tests/test_sx1262_adapter.cpp'
+      - 'scripts/test-radio-recovery-state.py'
+      - '.github/workflows/sx1262-host-safety.yml'
+  pull_request:
+  workflow_dispatch:
+jobs:
+  host-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Recovery reference regression
+        run: python3 scripts/test-radio-recovery-state.py
+      - name: SX1262 adapter host test
+        run: g++ -std=c++17 -Wall -Wextra -Werror -Ifirmware/core/include firmware/tests/test_sx1262_adapter.cpp -o /tmp/ghostwave-sx1262-test && /tmp/ghostwave-sx1262-test
+      - name: Keep hardware release blocked
+        run: |
+          if python3 scripts/check-release-readiness.py; then
+            echo 'ERROR: release gate unexpectedly opened' >&2
+            exit 1
+          fi
