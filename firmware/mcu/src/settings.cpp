@@ -100,6 +100,9 @@ bool loadSettings(Settings& s) {
       PeerKey& p = s.peers[s.peerCount++];
       p.id = blob[off] | blob[off + 1] << 8 | blob[off + 2] << 16 | static_cast<uint32_t>(blob[off + 3]) << 24;
       std::memcpy(p.pub.data(), blob + off + 4, kKeySize);
+      if (p.id == 0 || p.id == kBroadcast) return false;
+      for (size_t j = 0; j + 1 < s.peerCount; ++j)
+        if (s.peers[j].id == p.id) return false;
     }
   } else if (len) {
     return false;  // malformed peer trust store
