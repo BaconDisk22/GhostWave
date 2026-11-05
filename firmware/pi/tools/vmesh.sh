@@ -242,6 +242,10 @@ if [ $ok = 1 ]; then
   say "PASS: the encrypted DM reached D and the SOS reached C and D across the partition"
   exit 0
 fi
+cmd B pos
+sleep 1
+say "carrier position at failure:"
+last B "^(fix|nofix) "
 has D "MSG from" || say "FAIL: D never got the DM"
 has D "SOS from" || say "FAIL: D never got the SOS"
 has C "SOS from" || say "FAIL: C never got the SOS"
