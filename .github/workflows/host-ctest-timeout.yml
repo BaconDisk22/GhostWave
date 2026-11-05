@@ -1,0 +1,19 @@
+name: Host CTest timeout
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'firmware/tests/**'
+      - 'firmware/CMakeLists.txt'
+      - '.github/workflows/host-ctest-timeout.yml'
+permissions:
+  contents: read
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - run: cmake -S firmware -B firmware/build -DGHOSTWAVE_BUILD_VIRT=ON -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+      - run: cmake --build firmware/build --parallel
+      - run: ctest --test-dir firmware/build --output-on-failure --timeout 60
