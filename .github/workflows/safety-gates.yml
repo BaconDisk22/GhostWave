@@ -1,0 +1,24 @@
+name: Firmware safety gates
+on:
+  push:
+    paths:
+      - 'firmware/t1000e/**'
+      - 'scripts/check-probe-no-tx.py'
+      - 'scripts/check-artifact-names.py'
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - 'firmware/t1000e/**'
+      - 'scripts/check-probe-no-tx.py'
+      - 'scripts/check-artifact-names.py'
+      - '.github/workflows/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - run: python3 scripts/check-probe-no-tx.py
+      - run: python3 scripts/check-artifact-names.py
