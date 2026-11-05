@@ -1,0 +1,21 @@
+name: Reliability verification
+
+on:
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - 'scripts/check-radio-reliability.sh'
+      - '.github/workflows/reliability.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reliability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Host regression suite and four-node virtual mesh
+        run: bash scripts/check-radio-reliability.sh
