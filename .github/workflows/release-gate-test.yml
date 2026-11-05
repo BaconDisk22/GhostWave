@@ -1,0 +1,26 @@
+name: Release gate regression
+on:
+  push:
+    paths:
+      - 'scripts/check-release-readiness.py'
+      - '.github/workflows/release-gate-test.yml'
+  pull_request:
+    paths:
+      - 'scripts/check-release-readiness.py'
+      - '.github/workflows/release-gate-test.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  release-block:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Prototype must not pass release gate
+        shell: bash
+        run: |
+          if python3 scripts/check-release-readiness.py; then
+            echo 'ERROR: prototype release gate unexpectedly opened'
+            exit 1
+          fi
+          echo 'PASS: release remains blocked until hardware qualification'
