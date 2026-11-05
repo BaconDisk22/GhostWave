@@ -95,12 +95,14 @@ bool loadSettings(Settings& s) {
   size_t len = nvs->getBytesLength("peers");
   if (len && len % kPeerRecord == 0 && len <= kMaxStoredPeers * kPeerRecord) {
     uint8_t blob[kMaxStoredPeers * kPeerRecord];
-    nvs->getBytes("peers", blob, len);
+    if (nvs->getBytes("peers", blob, len) != len) return false;
     for (size_t off = 0; off < len; off += kPeerRecord) {
       PeerKey& p = s.peers[s.peerCount++];
       p.id = blob[off] | blob[off + 1] << 8 | blob[off + 2] << 16 | static_cast<uint32_t>(blob[off + 3]) << 24;
       std::memcpy(p.pub.data(), blob + off + 4, kKeySize);
     }
+  } else if (len) {
+    return false;  // malformed peer trust store
   }
   return true;
 }
