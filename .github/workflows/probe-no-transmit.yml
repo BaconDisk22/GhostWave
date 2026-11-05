@@ -1,0 +1,20 @@
+name: Probe no-transmission safety
+on:
+  push:
+    paths:
+      - 'firmware/t1000e/**'
+      - 'scripts/check-probe-no-tx.py'
+      - '.github/workflows/probe-no-transmit.yml'
+  pull_request:
+    paths:
+      - 'firmware/t1000e/**'
+      - 'scripts/check-probe-no-tx.py'
+      - '.github/workflows/probe-no-transmit.yml'
+permissions:
+  contents: read
+jobs:
+  safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - run: python3 scripts/check-probe-no-tx.py
