@@ -1,25 +1,39 @@
 #!/usr/bin/env python3
-"""Reference regression for duplicate SOS acknowledgments.
+"""Bounded reference SOS ACK deduplication; not router integration."""
+from collections import OrderedDict
 
-This models intended behavior; integration with the router remains separate.
-"""
 class AckTracker:
-    def __init__(self):
-        self._seen = set()
+    def __init__(self, capacity=128):
+        if capacity < 1:
+            raise ValueError("capacity")
+        self.capacity = capacity
+        self.seen = OrderedDict()
 
-    def accept(self, origin: int, sequence: int, responder: int) -> bool:
-        if not (0 <= sequence <= 65535):
-            raise ValueError("sequence out of range")
+    def accept(self, origin, sequence, responder):
+        if any(not isinstance(v, int) or not 0 <= v <= 0xffffffff for v in (origin, responder)):
+            raise ValueError("invalid node ID")
+        if not isinstance(sequence, int) or not 0 <= sequence <= 65535:
+            raise ValueError("invalid sequence")
         key = (origin, sequence, responder)
-        if key in self._seen:
+        if key in self.seen:
             return False
-        self._seen.add(key)
+        self.seen[key] = None
+        if len(self.seen) > self.capacity:
+            self.seen.popitem(last=False)
         return True
 
-tracker = AckTracker()
-assert tracker.accept(10, 1, 20)
-assert not tracker.accept(10, 1, 20)
-assert tracker.accept(10, 1, 21)
-assert tracker.accept(10, 2, 20)
-assert tracker.accept(11, 1, 20)
-print("PASS: SOS ACK reference deduplication")
+t = AckTracker(2)
+assert t.accept(10, 1, 20)
+assert not t.accept(10, 1, 20)
+assert t.accept(10, 1, 21)
+assert t.accept(10, 2, 20)
+assert len(t.seen) == 2
+assert t.accept(10, 1, 20), "evicted entry should be accepted again"
+for values in [(10, -1, 20), (10, 65536, 20), (-1, 1, 20)]:
+    try:
+        t.accept(*values)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid SOS ACK accepted")
+print("PASS: bounded SOS ACK reference model")
