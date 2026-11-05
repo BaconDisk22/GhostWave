@@ -4,6 +4,8 @@ import unittest
 
 class Recovery:
     def __init__(self, max_attempts=3):
+        if not isinstance(max_attempts, int) or isinstance(max_attempts, bool) or max_attempts < 0:
+            raise ValueError('invalid retry budget')
         self.max_attempts = max_attempts
         self.attempts = 0
         self.ready = False
@@ -31,6 +33,14 @@ class RecoveryTests(unittest.TestCase):
         r.fault()
         self.assertFalse(r.ready)
         self.assertTrue(r.retry(True, True))
+    def test_invalid_budgets(self):
+        for budget in (-1, None, True, 1.5):
+            with self.assertRaises(ValueError):
+                Recovery(budget)
+    def test_zero_budget(self):
+        r = Recovery(0)
+        self.assertFalse(r.retry(True, True))
+        self.assertFalse(r.ready)
     def test_retry_bounded(self):
         r = Recovery(2)
         self.assertFalse(r.retry(True, False))
