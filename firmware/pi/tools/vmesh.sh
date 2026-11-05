@@ -134,6 +134,14 @@ done
 node_id() { awk '/^ghostwaved node /{print $3; exit}' "$work/$1.log"; }
 ID_A=$(node_id A) ID_B=$(node_id B) ID_C=$(node_id C) ID_D=$(node_id D)
 say "node IDs (from each identity key): A $ID_A, B $ID_B, C $ID_C, D $ID_D"
+for id in "$ID_A" "$ID_B" "$ID_C" "$ID_D"; do
+  if [[ ! "$id" =~ ^[0-9a-fA-F]{8}$ ]]; then
+    say "FAIL: malformed node ID: $id"; VMESH_KEEP=1; exit 1
+  fi
+done
+if [ "$(printf "%s\n" "$ID_A" "$ID_B" "$ID_C" "$ID_D" | sort -u | wc -l | tr -d " ")" != 4 ]; then
+  say "FAIL: duplicate node identities"; VMESH_KEEP=1; exit 1
+fi
 pub_A=$(awk '/^key ed25519 /{print substr($3,1,64); exit}' "$work/A.log")
 pub_D=$(awk '/^key ed25519 /{print substr($3,1,64); exit}' "$work/D.log")
 cmd A peer $ID_D "$pub_D"
