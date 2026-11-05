@@ -181,7 +181,13 @@ ok=1
 wait_for 150 D "MSG from $ID_A" || ok=0
 # usually seconds; a lost offer is re-offered after 60-75 s plus a beacon exchange
 wait_for 150 D "SOS from $ID_A" || ok=0
-wait_for 30 C "SOS from $ID_A" || ok=0
+# C can miss B's first offer due to hidden-terminal collisions. Keep
+# checking through a full additional SOS probe window; never count D's
+# receipt as evidence that C received the SOS.
+if ! wait_for 30 C "SOS from $ID_A"; then
+  say "C has not received SOS yet; waiting through another re-offer window"
+  wait_for 150 C "SOS from $ID_A" || ok=0
+fi
 for n in $names; do cmd $n stats; done
 sleep 1
 
