@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ghostwave-reliability-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   reliability:
     runs-on: ubuntu-latest
@@ -18,4 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4.2.2
       - name: Host regression suite and four-node virtual mesh
-        run: bash scripts/check-radio-reliability.sh
+        shell: bash
+        run: |
+          # Avoid the fixed 47700 port shared by concurrent CI jobs.
+          export VMESH_PORT=$(( 48000 + GITHUB_RUN_ID % 10000 ))
+          echo "Using isolated virtual-mesh port $VMESH_PORT"
+          bash scripts/check-radio-reliability.sh
