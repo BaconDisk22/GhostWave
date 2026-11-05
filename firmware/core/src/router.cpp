@@ -1092,9 +1092,20 @@ bool Router::offerSos(uint32_t nbId, const uint8_t* bloom, bool known, bool prob
                                      [](auto& a, auto& b) { return a.second.t < b.second.t; });
       e.offered.erase(oldest);
     }
+    // Do not record an offer for this neighbor when the queued frame targets
+    // someone else: it has not actually been offered to this recipient.
+    if (e.offer && !e.offer->sent && !e.offer->cancelled) {
+      if (e.offer->pkt.nextHop == nb16) {
+        e.offered[nb16] = {now, tries};
+        if (probe && tries < kSosRetryMax)
+          probeSos(nb16, now + sosRetryGap(tries), sosRetryGap(tries) / 4);
+      } else if (probe) {
+        probeSos(nb16, now + kSosRetryMs, kSosRetryMs / 4);
+      }
+      continue;
+    }
     e.offered[nb16] = {now, tries};
     if (probe && tries < kSosRetryMax) probeSos(nb16, now + sosRetryGap(tries), sosRetryGap(tries) / 4);
-    if (e.offer && !e.offer->sent && !e.offer->cancelled) continue;   // one queued copy serves all
     // an offer starts a fresh scoped flood in the neighbor's partition; nodes
     // that already hold this seq drop it, so it only spreads where it is new
     Packet g = e.pkt;
