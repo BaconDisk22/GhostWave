@@ -1,0 +1,25 @@
+name: Board manifest fail-closed regression
+on:
+  push:
+    paths:
+      - 'scripts/verify-*-board.py'
+      - 'scripts/test-board-manifest-gates.py'
+      - 'firmware/t1000e/board-verified.json'
+      - 'firmware/rak4631/board-verified.json'
+      - '.github/workflows/board-manifest-tests.yml'
+  pull_request:
+    paths:
+      - 'scripts/verify-*-board.py'
+      - 'scripts/test-board-manifest-gates.py'
+      - 'firmware/t1000e/board-verified.json'
+      - 'firmware/rak4631/board-verified.json'
+      - '.github/workflows/board-manifest-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fail-closed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - run: python3 scripts/test-board-manifest-gates.py
