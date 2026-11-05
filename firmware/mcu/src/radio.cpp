@@ -113,9 +113,12 @@ bool McuRadio::poll(uint8_t* buf, size_t cap, size_t& len, float& rssiDbm) {
       rssiDbm = g_sx.getRSSI();
       len = received;
       ok = true;
-    } else if (st == RADIOLIB_ERR_CRC_MISMATCH) {
+    } else {
+      // Count failed reads, not just CRC mismatches, for field diagnostics.
       ++crcErrors_;
     }
+  } else if (received > cap || received > 255) {
+    ++crcErrors_;
   }
   g_sx.startReceive();
   return ok;
