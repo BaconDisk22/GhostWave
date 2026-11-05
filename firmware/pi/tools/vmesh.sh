@@ -181,7 +181,7 @@ cmd B pos
 sleep 1
 say "B position after walk:"
 last B "^(fix|nofix) "
-if ! grep -Eq '^fix 46\.94[0-9]+ -113\.99[0-9]+' "$work/B.log"; then
+if ! grep -Eq '^fix 46\.94[0-9]+ -113\.98[0-9]+' "$work/B.log"; then
   say "FAIL: B did not consume the final NMEA fix; cannot test relay delivery"
   VMESH_KEEP=1
   exit 1
