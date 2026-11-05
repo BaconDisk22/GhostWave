@@ -1,0 +1,21 @@
+name: Board manifest validation cases
+on:
+  push:
+    paths:
+      - 'scripts/verify-*-board.py'
+      - 'scripts/test-board-manifest-validation.py'
+      - '.github/workflows/board-manifest-edge-cases.yml'
+  pull_request:
+    paths:
+      - 'scripts/verify-*-board.py'
+      - 'scripts/test-board-manifest-validation.py'
+      - '.github/workflows/board-manifest-edge-cases.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  manifest-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - run: python3 scripts/test-board-manifest-validation.py
