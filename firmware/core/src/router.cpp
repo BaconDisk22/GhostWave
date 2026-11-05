@@ -975,11 +975,13 @@ void Router::onSos(const Packet& p, uint64_t now) {
     SosEntry& e = it->second;
     if (seq == e.seq) {
       if (e.flood && !e.flood->sent && ++e.dups >= kSosDupCancel) e.flood->cancelled = true;
-      if (e.offer && !e.offer->sent) e.offer->cancelled = true;   // someone else offered it
-      // A duplicate confirms this sender has the SOS. Clear its pending
-      // probe: retaining it creates repeated beacon exchanges even after
-      // all neighbors have converged (bounded-probe regression). 
-      if (p.prevHop) sosProbe_.erase(p.prevHop);
+      // A duplicate only proves that its sender carries this SOS. Keep an
+      // offer queued for a different partition/neighbor; otherwise a nearby
+      // duplicate can suppress delivery across a moving carrier's new link.
+      if (e.offer && !e.offer->sent &&
+          (e.offer->pkt.nextHop == 0 || e.offer->pkt.nextHop == p.prevHop))
+        e.offer->cancelled = true;
+      if (p.prevHop) sosProbe_.erase(p.prevHop);   // its sender has it: no need to check
     } else {
       offerSos(0, nullptr, false, false, now);   // sender is behind: our newer seq goes out (rate-limited)
     }
