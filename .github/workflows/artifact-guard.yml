@@ -1,0 +1,19 @@
+name: Firmware artifact name guard
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/check-artifact-names.py'
+  push:
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/check-artifact-names.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - run: python3 scripts/check-artifact-names.py
