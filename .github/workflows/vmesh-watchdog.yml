@@ -1,0 +1,33 @@
+name: Virtual mesh watchdog
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'firmware/pi/**'
+      - 'firmware/core/**'
+      - '.github/workflows/vmesh-watchdog.yml'
+permissions:
+  contents: read
+jobs:
+  virtual-mesh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - run: cmake -S firmware -B firmware/build -DGHOSTWAVE_BUILD_VIRT=ON
+      - run: cmake --build firmware/build --parallel
+      - name: Run bounded four-node scenario
+        working-directory: firmware
+        env:
+          VMESH_KEEP: '1'
+        run: |
+          export VMESH_PORT=$(( 48000 + GITHUB_RUN_ID % 10000 ))
+          timeout --signal=TERM --kill-after=10s 480s ./pi/tools/vmesh.sh build/ghostwaved
+      - name: Preserve failed scenario logs
+        if: failure()
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: vmesh-watchdog-${{ github.run_id }}
+          path: /tmp/vmesh.*
+          if-no-files-found: warn
+          retention-days: 7
