@@ -23,8 +23,17 @@ jobs:
       - uses: actions/checkout@v4.2.2
       - name: Host regression suite and four-node virtual mesh
         shell: bash
+        env:
+          VMESH_KEEP: '1'
         run: |
-          # Avoid the fixed 47700 port shared by concurrent CI jobs.
           export VMESH_PORT=$(( 48000 + GITHUB_RUN_ID % 10000 ))
           echo "Using isolated virtual-mesh port $VMESH_PORT"
           bash scripts/check-radio-reliability.sh
+      - name: Upload virtual-mesh failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: ghostwave-vmesh-failure-${{ github.run_id }}
+          path: /tmp/vmesh.*
+          if-no-files-found: warn
+          retention-days: 7
