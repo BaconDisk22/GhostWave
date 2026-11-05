@@ -175,6 +175,17 @@ for km in 2.0 2.5 3.0 3.5 4.0 4.5 5.0 5.5 6.0 6.5 7.0 7.5 8.0; do
   gga "$(lat_at $km)" >>"$work/B.nmea"
   sleep 2
 done
+# Verify the simulated hiker actually consumed the appended NMEA fixes.
+# A failed position update would leave the carrier across the partition.
+cmd B pos
+sleep 1
+say "B position after walk:"
+last B "^(fix|nofix) "
+if ! grep -Eq '^fix 46\.94[0-9]+ -113\.990000' "$work/B.log"; then
+  say "FAIL: B did not consume the final NMEA fix; cannot test relay delivery"
+  VMESH_KEEP=1
+  exit 1
+fi
 say "B is at 8 km: 1 km from C, 2.5 km from D, 8 km from A"
 
 ok=1
