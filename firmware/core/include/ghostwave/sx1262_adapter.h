@@ -16,7 +16,7 @@ class Sx1262Adapter final : public RadioPort {
   explicit Sx1262Adapter(Sx1262Driver& driver) : driver_(driver) {}
   bool channelBusy() override { return !driver_.ready() || driver_.busy(); }
   bool transmit(const uint8_t* data, size_t length) override {
-    if (!driver_.ready() || !data || length == 0 || length > 255) return false;
+    if (!driver_.ready() || !data || length == 0 || length > 255 || driver_.busy()) return false;
     return driver_.send(data, length);
   }
  private:
