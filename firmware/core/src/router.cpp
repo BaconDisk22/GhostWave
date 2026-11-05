@@ -1087,6 +1087,12 @@ bool Router::offerSos(uint32_t nbId, const uint8_t* bloom, bool known, bool prob
       if (probe && known && tries <= kSosRetryMax) probeSos(nb16, readyAt, kSosRetryMs / 4);
       continue;
     }
+    if (e.offer && !e.offer->sent && !e.offer->cancelled && e.offer->pkt.nextHop != nb16) {
+      // Another neighbor owns the queued offer. Do not evict this neighbor's
+      // offer history until we can actually enqueue its frame.
+      if (probe) probeSos(nb16, now + kSosRetryMs, kSosRetryMs / 4);
+      continue;
+    }
     if (e.offered.size() >= kOfferedCapacity && o == e.offered.end()) {
       auto oldest = std::min_element(e.offered.begin(), e.offered.end(),
                                      [](auto& a, auto& b) { return a.second.t < b.second.t; });
