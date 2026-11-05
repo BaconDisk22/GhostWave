@@ -1,0 +1,25 @@
+name: Host reference regressions
+on:
+  push:
+    paths:
+      - 'scripts/test-identity-file-permissions.py'
+      - 'scripts/test-retry-backoff.py'
+      - 'scripts/test-sos-ack-dedup.py'
+      - '.github/workflows/reference-regressions.yml'
+  pull_request:
+    paths:
+      - 'scripts/test-identity-file-permissions.py'
+      - 'scripts/test-retry-backoff.py'
+      - 'scripts/test-sos-ack-dedup.py'
+      - '.github/workflows/reference-regressions.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-reference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - run: python3 scripts/test-identity-file-permissions.py
+      - run: python3 scripts/test-retry-backoff.py
+      - run: python3 scripts/test-sos-ack-dedup.py
