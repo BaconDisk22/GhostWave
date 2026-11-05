@@ -976,9 +976,10 @@ void Router::onSos(const Packet& p, uint64_t now) {
     if (seq == e.seq) {
       if (e.flood && !e.flood->sent && ++e.dups >= kSosDupCancel) e.flood->cancelled = true;
       if (e.offer && !e.offer->sent) e.offer->cancelled = true;   // someone else offered it
-      // A duplicate from this sender confirms its copy, but does not prove
-      // it carries every other SOS in our store. Retain its Bloom probe so
-      // missing originators can still be offered on the next beacon.
+      // A duplicate confirms this sender has the SOS. Clear its pending
+      // probe: retaining it creates repeated beacon exchanges even after
+      // all neighbors have converged (bounded-probe regression). 
+      if (p.prevHop) sosProbe_.erase(p.prevHop);
     } else {
       offerSos(0, nullptr, false, false, now);   // sender is behind: our newer seq goes out (rate-limited)
     }
