@@ -24,7 +24,20 @@ jobs:
         run: ctest --test-dir build --output-on-failure
       - name: Virtual mesh demo (4 daemons over UDP multicast)
         working-directory: firmware
-        run: ./pi/tools/vmesh.sh build/ghostwaved
+        env:
+          VMESH_KEEP: '1'
+        run: |
+          export VMESH_PORT=$(( 48000 + GITHUB_RUN_ID % 10000 ))
+          echo "Isolated multicast port: $VMESH_PORT"
+          ./pi/tools/vmesh.sh build/ghostwaved
+      - name: Upload virtual-mesh diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: vmesh-ci-failure-${{ github.run_id }}
+          path: /tmp/vmesh.*
+          if-no-files-found: warn
+          retention-days: 7
 
   sim-smoke:
     name: Sim smoke test
