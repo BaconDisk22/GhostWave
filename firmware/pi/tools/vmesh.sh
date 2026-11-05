@@ -203,16 +203,22 @@ say "relay diagnostic: B after walk"
 cmd B stats
 sleep 1
 last B "^tx "
-ok=1
-wait_for 150 D "MSG from $ID_A" || ok=0
-# usually seconds; a lost offer is re-offered after 60-75 s plus a beacon exchange
-wait_for 150 D "SOS from $ID_A" || ok=0
-# C can miss B's first offer due to hidden-terminal collisions. Keep
-# checking through a full additional SOS probe window; never count D's
-# receipt as evidence that C received the SOS.
-if ! wait_for 30 C "SOS from $ID_A"; then
-  say "C has not received SOS yet; waiting through another re-offer window"
-  wait_for 150 C "SOS from $ID_A" || ok=0
+# Observe all three deliveries against one shared deadline. Sequential waits
+# previously multiplied CI duration and obscured which delivery stalled first.
+ok=0
+deadline=$(( $(date +%s) + 180 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if has D "MSG from $ID_A" && has D "SOS from $ID_A" && has C "SOS from $ID_A"; then
+    ok=1
+    break
+  fi
+  sleep 1
+done
+if [ "$ok" = 0 ]; then
+  say "delivery deadline expired (180s):"
+  has D "MSG from $ID_A" || say "  pending: D encrypted DM"
+  has D "SOS from $ID_A" || say "  pending: D SOS"
+  has C "SOS from $ID_A" || say "  pending: C SOS"
 fi
 for n in $names; do cmd $n stats; done
 sleep 1
