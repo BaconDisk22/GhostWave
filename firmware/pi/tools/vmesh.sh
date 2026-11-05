@@ -189,6 +189,9 @@ cmd B pos
 sleep 1
 say "B position after walk:"
 last B "^(fix|nofix) "
+if grep -q "^nofix" "$work/B.log"; then
+  say "note: B reported an unavailable position during the simulation"
+fi
 if ! grep -Eq '^fix 46\.94[0-9]+ -113\.990000' "$work/B.log"; then
   say "FAIL: B did not consume the final NMEA fix; cannot test relay delivery"
   VMESH_KEEP=1
