@@ -1,6 +1,6 @@
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include "ghostwave/router.h"
 
 // Host-only contract test. This is NOT an RAK4631 SX1262 driver.
@@ -13,6 +13,10 @@ class DisabledRadio final : public gw::RadioPort {
 int main() {
   DisabledRadio radio;
   const uint8_t frame[] = {0x01, 0x02};
-  assert(!radio.transmit(frame, sizeof frame));
-  assert(radio.attempts == 1);
+  const bool sent = radio.transmit(frame, sizeof frame);
+  if (sent || radio.attempts != 1) {
+    std::fprintf(stderr, "FAIL: disabled radio unexpectedly transmitted or missed call\n");
+    return 1;
+  }
+  return 0;
 }

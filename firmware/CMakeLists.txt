@@ -11,7 +11,6 @@ option(GHOSTWAVE_BUILD_TESTS "Build host unit tests" ON)
 option(GHOSTWAVE_BUILD_PI "Build the Raspberry Pi daemon (needs lgpio)" OFF)
 option(GHOSTWAVE_BUILD_VIRT "Build ghostwaved with only the UDP virtual radio (no lgpio/RadioLib)" OFF)
 
-# Monocypher 4.0.2, vendored and pinned (third_party/monocypher/README.md)
 add_library(monocypher STATIC
   third_party/monocypher/monocypher.c
   third_party/monocypher/monocypher-ed25519.c)
@@ -34,19 +33,20 @@ if(GHOSTWAVE_BUILD_TESTS)
   target_link_libraries(ghostwave_tests ghostwave_core monocypher)
   target_compile_options(ghostwave_tests PRIVATE -Wall -Wextra)
   add_test(NAME ghostwave_tests COMMAND ghostwave_tests)
-  # the virtual radio's channel model and repeat filter (pi/vchannel.*): no sockets
   add_executable(ghostwave_vchannel_tests tests/test_vchannel.cpp pi/vchannel.cpp)
   target_include_directories(ghostwave_vchannel_tests PRIVATE pi)
   target_link_libraries(ghostwave_vchannel_tests ghostwave_core)
   target_compile_options(ghostwave_vchannel_tests PRIVATE -Wall -Wextra)
   add_test(NAME ghostwave_vchannel_tests COMMAND ghostwave_vchannel_tests)
+  add_executable(ghostwave_radio_port_contract_tests tests/test_radio_port_contract.cpp)
+  target_link_libraries(ghostwave_radio_port_contract_tests ghostwave_core)
+  target_compile_options(ghostwave_radio_port_contract_tests PRIVATE -Wall -Wextra)
+  add_test(NAME ghostwave_radio_port_contract_tests COMMAND ghostwave_radio_port_contract_tests)
 endif()
 
-# ghostwaved always has the UDP virtual radio; GHOSTWAVE_BUILD_PI adds the E22P HAT.
 if(GHOSTWAVE_BUILD_PI OR GHOSTWAVE_BUILD_VIRT)
   add_executable(ghostwaved pi/main.cpp pi/radio_udp.cpp pi/vchannel.cpp)
   target_link_libraries(ghostwaved ghostwave_core)
-  # warnings on our sources only; RadioLib's headers are noisy
   set_source_files_properties(pi/main.cpp pi/radio_udp.cpp pi/vchannel.cpp
     TARGET_DIRECTORY ghostwaved PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra")
 endif()
