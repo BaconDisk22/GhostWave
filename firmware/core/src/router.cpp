@@ -385,6 +385,11 @@ void Router::serviceMac(uint64_t now) {
     best->sent = true;
     ++stats_.tx;
     stats_.airMs += dur;
+  } else {
+    // The queue entry has already been removed. Mark the failed attempt
+    // cancelled so a retained SOS offer pointer cannot indefinitely block
+    // re-offering to this or another neighbor.
+    best->cancelled = true;
   }
   // A queued SOS has not had a chance to be echoed yet. Start each echo
   // window at the radio attempt, including retries. A failed transmit still
