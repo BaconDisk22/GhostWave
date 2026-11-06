@@ -737,6 +737,27 @@ static void testSosRadioFailure() {
   CHECK(a.router->stats().sosTx == 2);   // the neighbor's echo stops further retries
 }
 
+static void testSosCarrierRadioFailure() {
+  std::printf("router: carrier recovers from a rejected SOS offer to a new partition\\n");
+  Medium m;
+  auto& a = m.add(600, 0);
+  auto& b = m.add(601, 2);
+  auto& c = m.add(602, 9);
+  m.run(5000);
+  CHECK(a.router->startSos("carrier retry", 40, 3, m.now));
+  m.run(10000);
+  CHECK(b.router->hasSos(600));
+  CHECK(!c.router->hasSos(600));
+
+  // The radio refuses the first offer when the carrier reaches a new
+  // partition. A removed queue entry must not remain pending forever.
+  b.radio.failSos = 1;
+  m.move(b, 7.5);
+  m.run(180000);
+  CHECK(b.radio.failSos == 0);
+  CHECK(c.router->hasSos(600));
+}
+
 static void testSosStopRestart() {
   std::printf("router: stopping and replacing SOS cancels queued originator frames\n");
   auto ownPackets = [](const Medium& m) {
@@ -1389,6 +1410,7 @@ int main() {
   testSosEarlyResend();
   testSosBusyChannel();
   testSosRadioFailure();
+  testSosCarrierRadioFailure();
   testSosStopRestart();
   testSosExpiryAndRollover();
   testIdentCrypto();
