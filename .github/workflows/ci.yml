@@ -29,7 +29,9 @@ jobs:
         run: |
           export VMESH_PORT=$(( 48000 + GITHUB_RUN_ID % 10000 ))
           echo "Isolated multicast port: $VMESH_PORT"
-          ./pi/tools/vmesh.sh build/ghostwaved
+          # Avoid indefinite CI hangs if a daemon or carrier stalls. Preserve
+          # the script's nonzero exit status and upload its failure logs.
+          timeout --signal=TERM --kill-after=10s 480s ./pi/tools/vmesh.sh build/ghostwaved
       - name: Upload virtual-mesh diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4.4.3
