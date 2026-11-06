@@ -256,6 +256,10 @@ cmd B pos
 sleep 1
 say "carrier position at failure:"
 last B "^(fix|nofix) "
+say "radio statistics at failure:"
+for n in $names; do cmd "$n" stats; done
+sleep 1
+for n in $names; do last "$n" "^vradio heard"; done
 has D "MSG from" || say "FAIL: D never got the DM"
 has D "SOS from" || say "FAIL: D never got the SOS"
 has C "SOS from" || say "FAIL: C never got the SOS"
