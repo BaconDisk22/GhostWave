@@ -61,6 +61,17 @@ class AppPort {
   virtual void onKeyChange(uint32_t id, const uint8_t newEdPub[32], const std::string& name) {
     (void)id, (void)newEdPub, (void)name;
   }
+  // A neighbor's beacon: its position, and whether it was new or had not been
+  // heard for a while (client link, docs/CLIENT_PROTOCOL.md).
+  virtual void onNeighbor(uint32_t id, const Position& pos, bool isNew) { (void)id, (void)pos, (void)isNew; }
+};
+
+// A peer key the router holds (pinned, or learned from IDENT).
+struct PeerInfo {
+  uint32_t id = 0;
+  std::array<uint8_t, 32> xPub{};
+  std::string name;
+  bool pinned = false;
 };
 
 struct Config {
@@ -138,6 +149,10 @@ class Router {
   // key or a table full of pinned keys.
   bool addPeerKey(uint32_t id, const uint8_t x25519Public[32]);
   bool hasPeerKey(uint32_t id) const { return peers_.count(id) != 0; }
+  // Every peer key held, in node ID order. No DM keys leave the router.
+  std::vector<PeerInfo> peerList() const;
+  // Names a peer we hold a key for (contact card). An IDENT later overrides it.
+  bool setPeerName(uint32_t id, const std::string& name);
   // Asks a neighbor for its IDENT (1 hop; the request carries our own IDENT).
   // False without a signing key.
   bool requestIdent(uint32_t id, uint64_t nowMs);

@@ -458,11 +458,18 @@ for DMs once a session exists.
 
 ## 10. Client protocol (phone ↔ node)
 
-- Transports: BLE (Nordic UART-style service), USB serial, TCP (Pi daemon).
-- Framing: `0x94 0xC3 len_lo len_hi` + protobuf `ToRadio`/`FromRadio`. This is the same
-  framing idea as Meshtastic, so existing serial tooling is easy to adapt, but the schema
-  is ours.
-- Published as `proto/ghostwave.proto` with its own version number.
+Specified in [CLIENT_PROTOCOL.md](CLIENT_PROTOCOL.md), schema in `proto/ghostwave.proto`
+(protocol version 1).
+
+- Transports: TCP (Pi daemon, `ghostwaved --client-tcp`, done); BLE (Nordic UART-style
+  service) and USB serial on the MCU boards, planned. All carry the same frames.
+- Framing: `0x94 0xC3 len_lo len_hi version` + protobuf `ToRadio`/`FromRadio`, at most
+  180 bytes a frame so one frame fits one BLE write. The same framing idea as Meshtastic,
+  so existing serial tooling is easy to adapt, but the schema is ours.
+- The node side is a small hand-written protobuf codec in `firmware/core`, shared by the
+  daemon and the MCU firmware; apps generate code from the `.proto`.
+- Events that arrive with no client connected are held (64, in RAM) and replayed on the
+  next `Hello`.
 
 ---
 

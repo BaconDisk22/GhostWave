@@ -1,0 +1,243 @@
+// GhostWave client protocol, version 1 (docs/CLIENT_PROTOCOL.md).
+//
+// Each message travels in a frame:
+//   0x94 0xC3 len_lo len_hi | version (1) | ToRadio or FromRadio bytes
+// where len counts the version byte and the protobuf bytes, at most 176.
+//
+// The node side is a hand-written codec (firmware/core/src/client_proto.cpp);
+// field numbers here must match it. Apps generate code from this file with any
+// protobuf library (e.g. `protoc --dart_out=...`).
+//
+// Rules for later versions: never renumber or retype a field; add new
+// requests/events as new oneof fields; a receiver ignores fields it does not
+// know, and a node answers a request it does not know with
+// Error{code: UNKNOWN_REQUEST}.
+syntax = "proto3";
+
+package ghostwave.client.v1;
+
+// A GPS fix in 1e-7 degrees (WGS84). An absent Position means "no fix".
+message Position {
+  sint32 lat_e7 = 1;
+  sint32 lon_e7 = 2;
+}
+
+// --------------------------------------------------------------- app -> node
+
+message ToRadio {
+  // Echoed in every reply to this request. 0 = no reply correlation wanted.
+  uint32 req_id = 1;
+  oneof request {
+    Hello hello = 10;
+    SendText send_text = 11;
+    AddContact add_contact = 12;
+    ListContacts list_contacts = 13;
+    SetKnownPosition set_known_position = 14;
+    SosStart sos_start = 15;
+    SosStop sos_stop = 16;
+    SosAck sos_ack = 17;
+    GetStatus get_status = 18;
+    GetPosition get_position = 19;
+    SetOwnPosition set_own_position = 20;
+  }
+}
+
+// Must be the first request. Reply: NodeInfo, then any replayed events.
+message Hello {
+  uint32 protocol_version = 1;   // 1
+  string client_name = 2;        // for logs only
+}
+
+// Reply: SendQueued (msg_id assigned), later Delivered when the destination's
+// end-to-end ACK arrives. Errors: TOO_LONG, BAD_ARGUMENT, SEND_FAILED.
+message SendText {
+  fixed32 dest = 1;              // node ID
+  bytes text = 2;                // UTF-8; at most NodeInfo.max_text_bytes
+  uint32 client_msg_id = 3;      // app-chosen; echoed in SendQueued/Delivered
+}
+
+// Pins a contact's key, as carried by a QR code. Reply: Ok, or KEY_REJECTED.
+message AddContact {
+  fixed32 node_id = 1;           // 0 = derive from ed25519_pub
+  bytes ed25519_pub = 2;         // 32 bytes; must hash to node_id
+  bytes x25519_pub = 3;          // 32 bytes, legacy nodes only (no ed25519_pub)
+  string name = 4;               // local label, <= 32 bytes
+}
+
+// Reply: one Contact per peer key the node holds, then ContactsEnd.
+message ListContacts {}
+
+// Seeds where a node is believed to be (contact card, map pin). Reply: Ok.
+message SetKnownPosition {
+  fixed32 node_id = 1;
+  Position pos = 2;              // required
+}
+
+// Starts or updates our SOS (repeats until SosStop). Reply: Ok, or RATE_LIMITED.
+message SosStart {
+  bytes text = 1;                // UTF-8, cut to 60 bytes
+  optional uint32 battery_pct = 2;
+  optional uint32 accuracy_m = 3;
+}
+
+message SosStop {}               // Reply: Ok
+
+// Acknowledges an SOS we hold from node_id. Reply: Ok, or NOT_FOUND.
+message SosAck {
+  fixed32 node_id = 1;
+}
+
+message GetStatus {}             // Reply: Status
+message GetPosition {}           // Reply: OwnPosition
+
+// The phone's GPS fix becomes the node's own position (nodes without GPS).
+// An absent pos clears it. Reply: Ok.
+message SetOwnPosition {
+  Position pos = 1;
+}
+
+// --------------------------------------------------------------- node -> app
+
+message FromRadio {
+  uint32 req_id = 1;             // the request this answers; 0 = unsolicited event
+  bool replayed = 2;             // held while no client was connected
+  oneof event {
+    NodeInfo node_info = 10;
+    TextMessage text = 11;
+    Delivered delivered = 12;
+    SosAlert sos = 13;
+    SosAckReceived sos_ack = 14;
+    Neighbor neighbor = 15;
+    Status status = 16;
+    OwnPosition position = 17;
+    Error error = 18;
+    Contact contact = 19;
+    ContactsEnd contacts_end = 20;
+    SendQueued send_queued = 21;
+    Ok ok = 22;
+    PeerIdent peer_ident = 23;
+    KeyChange key_change = 24;
+  }
+}
+
+message NodeInfo {
+  uint32 protocol_version = 1;
+  fixed32 node_id = 2;
+  bytes name = 3;                // IDENT name, <= 9 bytes
+  bytes ed25519_pub = 4;         // identity key: what our QR code carries
+  bytes x25519_pub = 5;          // DM key (derived from ed25519_pub, or legacy)
+  bool legacy = 6;               // X25519-only node: no ed25519_pub, no IDENT
+  string firmware = 7;
+  uint32 max_text_bytes = 8;     // SendText.text limit with a DM key
+}
+
+message TextMessage {
+  fixed32 src = 1;
+  fixed32 msg_id = 2;
+  bytes text = 3;                // as received; usually UTF-8, not guaranteed
+  Position src_pos = 4;          // reserved: not filled by v1 nodes
+}
+
+message Delivered {
+  fixed32 dest = 1;
+  fixed32 msg_id = 2;
+  uint32 client_msg_id = 3;      // 0 if the message was not sent by a client
+}
+
+message SendQueued {
+  fixed32 dest = 1;
+  fixed32 msg_id = 2;            // mesh message ID
+  uint32 client_msg_id = 3;
+}
+
+message SosAlert {
+  fixed32 src = 1;
+  uint32 seq = 2;
+  Position pos = 3;              // absent: originator had no fix
+  optional uint32 accuracy_m = 4;
+  optional uint32 battery_pct = 5;
+  bytes text = 6;
+}
+
+message SosAckReceived {
+  fixed32 responder = 1;
+  uint32 seq = 2;
+}
+
+// A neighbor's beacon. is_new: first heard, or not heard for a while.
+message Neighbor {
+  fixed32 node_id = 1;
+  Position pos = 2;
+  bool is_new = 3;
+}
+
+message Status {
+  uint32 tx = 1;
+  uint32 rx = 2;
+  uint32 rx_bad = 3;
+  uint32 rx_auth_fail = 4;
+  uint32 delivered = 5;
+  uint32 forwarded = 6;
+  uint32 stored = 7;
+  uint64 air_ms = 8;
+  uint32 store_size = 9;
+  uint32 neighbors = 10;
+  uint32 sos_held = 11;
+  bool sos_active = 12;
+  uint32 uptime_s = 13;
+  uint32 clients = 14;
+  uint32 queued = 15;            // events waiting for a client
+}
+
+message OwnPosition {
+  Position pos = 1;              // absent: no fix
+}
+
+message Error {
+  enum Code {
+    NONE = 0;
+    BAD_FRAME = 1;
+    BAD_VERSION = 2;
+    UNKNOWN_REQUEST = 3;
+    NEED_HELLO = 4;
+    BAD_ARGUMENT = 5;
+    TOO_LONG = 6;
+    RATE_LIMITED = 7;
+    NOT_FOUND = 8;
+    KEY_REJECTED = 9;
+    SEND_FAILED = 10;
+    TOO_MANY_CLIENTS = 11;
+    NO_IDENTITY = 12;
+  }
+  Code code = 1;
+  string detail = 2;
+}
+
+message Contact {
+  fixed32 node_id = 1;
+  bytes name = 2;
+  bytes x25519_pub = 3;
+  bytes ed25519_pub = 4;         // only if pinned from an Ed25519 key this run
+  bool pinned = 5;               // false: learned from IDENT (trust on first use)
+}
+
+message ContactsEnd {
+  uint32 count = 1;
+}
+
+message Ok {}
+
+// A verified IDENT taught us a new peer key, or a known peer's new name.
+message PeerIdent {
+  fixed32 node_id = 1;
+  bytes name = 2;
+  bool is_new = 3;
+}
+
+// A signed IDENT for node_id carries a different key from the one held.
+// The node keeps the old key. Show a warning; accept only via AddContact.
+message KeyChange {
+  fixed32 node_id = 1;
+  bytes ed25519_pub = 2;
+  bytes name = 3;
+}

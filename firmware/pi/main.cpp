@@ -9,6 +9,10 @@
 //                          [--require-enc] [--responder]
 //        ./ghostwaved --radio udp [--mcast 239.77.0.1:47700] [--vif ADDR] [--vtx-dbm 24]
 //                     [--vgain 2] [--vfade 5] [--vlog] ...   (virtual radio, no hardware)
+//        [--client-tcp [HOST:]PORT]   app link (docs/CLIENT_PROTOCOL.md); off by
+//                     default, HOST defaults to 127.0.0.1. Any other host lets
+//                     every machine that can reach it drive this node: there is
+//                     no authentication yet.
 // stdin commands:  send <hex-id> <text> | known <hex-id> <lat> <lon> | stats | pos
 //                  keys | peer [<hex-id>] <hex-pubkey> | ident <hex-id>
 //                  sos <text> | sosstop | sosack <hex-id>
@@ -30,6 +34,7 @@
 //            must hash to the ID; prefix "x25519:" for a legacy node's key.
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
@@ -43,9 +48,12 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 
+#include "client_link.h"
 #include "host_radio.h"
 #include "ghostwave/crypto.h"
 #include "ghostwave/router.h"
@@ -76,6 +84,7 @@ struct Options {
   std::string keyFile = "/var/lib/ghostwave/identity.key";
   std::string pskFile, peersFile;
   bool requireEnc = false, responder = false, legacyX25519 = false;
+  std::string clientTcp;   // empty = no client link
 };
 
 using Key32 = std::array<uint8_t, gw::kKeySize>;
@@ -265,7 +274,11 @@ bool loadIdentity(const std::string& path, bool allowLegacy, Key32& secret, bool
 // Pins a peer key. `pubHex` is an Ed25519 key, which must hash to the ID, or
 // "x25519:" and a legacy node's key. An empty `idHex` takes the ID from the
 // Ed25519 key. Fills `err` on failure.
-bool addPeer(gw::Router& r, const std::string& idHex, const std::string& pubHex, std::string& err) {
+// Ed25519 keys of peers pinned this run (ListContacts reports them).
+std::map<uint32_t, Key32> g_edKeys;
+
+bool addPeer(gw::Router& r, const std::string& idHex, const std::string& pubHex, std::string& err,
+             uint32_t* idOut = nullptr) {
   uint32_t id = 0;
   if (!idHex.empty() && !parseId(idHex, id)) {
     err = "bad id (want up to 8 hex digits)";
@@ -295,7 +308,12 @@ bool addPeer(gw::Router& r, const std::string& idHex, const std::string& pubHex,
     }
     gw::ed25519ToX25519(pub, xPub);
   }
-  if (r.addPeerKey(id, xPub)) return true;
+  if (r.addPeerKey(id, xPub)) {
+    if (x25519) g_edKeys.erase(id);
+    else std::memcpy(g_edKeys[id].data(), pub, gw::kKeySize);
+    if (idOut) *idOut = id;
+    return true;
+  }
   err = "key rejected (low-order key, or peer table full)";
   return false;
 }
@@ -321,16 +339,24 @@ int loadPeers(const std::string& path, gw::Router& r) {
   return n;
 }
 
+// Prints router events, and passes them to the client link if there is one.
 class StdoutApp : public gw::AppPort {
  public:
+  ClientLink* link = nullptr;
+
   void onMessage(uint32_t src, uint32_t msgId, const std::vector<uint8_t>& p) override {
     std::printf("MSG from %08x id %08x: %.*s\n", src, msgId, static_cast<int>(p.size()),
                 reinterpret_cast<const char*>(p.data()));
     std::fflush(stdout);
+    if (link) link->onMessage(src, msgId, p);
   }
   void onDelivered(uint32_t dst, uint32_t msgId) override {
     std::printf("DELIVERED to %08x id %08x\n", dst, msgId);
     std::fflush(stdout);
+    if (link) link->onDelivered(dst, msgId);
+  }
+  void onNeighbor(uint32_t id, const gw::Position& pos, bool isNew) override {
+    if (link) link->onNeighbor(id, pos, isNew);
   }
   void onSos(const gw::SosInfo& s) override {
     std::printf("SOS from %08x seq %u", s.src, s.seq);
@@ -341,14 +367,17 @@ class StdoutApp : public gw::AppPort {
     std::printf(": %s\n", s.text.c_str());
     std::printf("  (ack with: sosack %08x)\n", s.src);
     std::fflush(stdout);
+    if (link) link->onSos(s);
   }
   void onSosAck(uint32_t responder, uint16_t seq) override {
     std::printf("SOSACK from %08x for seq %u\n", responder, seq);
     std::fflush(stdout);
+    if (link) link->onSosAck(responder, seq);
   }
   void onPeerIdent(uint32_t id, const std::string& name, bool firstSeen) override {
     std::printf("IDENT %s %08x \"%s\"\n", firstSeen ? "new peer" : "renamed", id, printable(name).c_str());
     std::fflush(stdout);
+    if (link) link->onPeerIdent(id, name, firstSeen);
   }
   void onKeyChange(uint32_t id, const uint8_t newEdPub[32], const std::string& name) override {
     std::printf("WARNING: KEY CHANGE for %08x \"%s\": a signed IDENT carries a different key.\n"
@@ -356,6 +385,7 @@ class StdoutApp : public gw::AppPort {
                 "  Still using the old key. To accept the new one: peer %08x %s\n",
                 id, printable(name).c_str(), id, toHex(newEdPub, gw::kKeySize).c_str());
     std::fflush(stdout);
+    if (link) link->onKeyChange(id, newEdPub, name);
   }
 
  private:
@@ -485,6 +515,10 @@ int main(int argc, char** argv) {
     else if (a == "--require-enc") o.requireEnc = true;
     else if (a == "--responder") o.responder = true;
     else if (a == "--legacy-x25519") o.legacyX25519 = true;
+    else if (a == "--client-tcp") {
+      o.clientTcp = next();
+      if (o.clientTcp.empty()) { std::fprintf(stderr, "--client-tcp needs [HOST:]PORT\n"); return 2; }
+    }
     else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
   }
   if (o.name.size() > gw::kIdentNameMax) {
@@ -602,10 +636,63 @@ int main(int argc, char** argv) {
               o.requireEnc ? ", plaintext DATA refused" : "", o.responder ? ", SOS responder" : "");
   std::fflush(stdout);
 
+  std::unique_ptr<ClientLink> link;
+  if (!o.clientTcp.empty()) {
+    signal(SIGPIPE, SIG_IGN);   // a client vanishing mid-write must not kill the node
+    ClientNodeIdentity self;
+    self.id = o.id;
+    self.name = o.name;
+    self.legacy = pub.legacy;
+    if (pub.legacy) {
+      self.xPub = pub.key;
+    } else {
+      self.edPub = pub.key;
+      gw::ed25519ToX25519(pub.key.data(), self.xPub.data());
+    }
+    ClientLink::Hooks hooks;
+    hooks.addPeer = [&router](uint32_t id, const gw::client::Bytes& ed, const gw::client::Bytes& x,
+                              std::string& err) -> uint32_t {
+      std::string idHex, pubHex;
+      if (id) {
+        char b[9];
+        std::snprintf(b, sizeof b, "%08x", id);
+        idHex = b;
+      }
+      if (ed.size() == gw::kKeySize && x.empty()) {
+        pubHex = toHex(ed.data(), ed.size());
+      } else if (x.size() == gw::kKeySize && ed.empty()) {
+        pubHex = kX25519Tag + toHex(x.data(), x.size());
+      } else {
+        err = "want one 32-byte key: ed25519_pub, or x25519_pub for a legacy node";
+        return 0;
+      }
+      uint32_t got = 0;
+      return addPeer(router, idHex, pubHex, err, &got) ? got : 0;
+    };
+    hooks.setOwnPosition = [&](const gw::Position& p) {
+      pos = p;
+      router.setPosition(pos, nowMs());
+      radio->setPosition(pos);
+    };
+    hooks.edKeys = &g_edKeys;
+    link.reset(new ClientLink(router, self, pos, hooks, nowMs()));
+    std::string err;
+    if (!link->listen(o.clientTcp, err)) {
+      std::fprintf(stderr, "--client-tcp: %s\n", err.c_str());
+      return 1;
+    }
+    app.link = link.get();
+    std::printf("client link on tcp %s%s\n", link->address().c_str(),
+                link->address().rfind("127.", 0) == 0 || link->address().rfind("[::1]", 0) == 0
+                    ? "" : " (reachable from the network: no client authentication yet)");
+    std::fflush(stdout);
+  }
+
   std::string gpsLine, cmdLine;
   uint8_t buf[256];
   for (;;) {
     uint64_t now = nowMs();
+    if (link) link->poll(now);
     float rssi = 0;
     if (size_t len = radio->receive(buf, sizeof buf, rssi)) router.onReceive(buf, len, rssi, now);
     if (gps >= 0) {

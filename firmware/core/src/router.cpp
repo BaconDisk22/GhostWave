@@ -154,6 +154,27 @@ bool Router::storePeer(uint32_t id, const uint8_t pub[32], bool pinned, uint64_t
   return true;
 }
 
+std::vector<PeerInfo> Router::peerList() const {
+  std::vector<PeerInfo> out;
+  out.reserve(peers_.size());
+  for (auto& kv : peers_) {
+    PeerInfo pi;
+    pi.id = kv.first;
+    pi.xPub = kv.second.xPub;
+    pi.name = kv.second.name;
+    pi.pinned = kv.second.pinned;
+    out.push_back(pi);
+  }
+  return out;
+}
+
+bool Router::setPeerName(uint32_t id, const std::string& name) {
+  auto it = peers_.find(id);
+  if (it == peers_.end()) return false;
+  it->second.name = name;
+  return true;
+}
+
 bool Router::openData(const Packet& p, std::vector<uint8_t>& plain) {
   auto pr = peers_.find(p.src);
   if (pr != peers_.end() && aeadOpen(p, pr->second.dm.data(), plain)) return true;
@@ -656,6 +677,7 @@ void Router::onBeacon(const Packet& p, uint64_t now) {
   }
   nb_[p.src] = {p.fwdPos, now, answered};
   learn(p.src, p.fwdPos, now);
+  app_.onNeighbor(p.src, p.fwdPos, isNew);
   wantIdent(p.src, now);
   if (p.payload.size() >= kBeaconFixed) {
     for (size_t off = kBeaconFixed; off + kGossipSize <= p.payload.size(); off += kGossipSize) {

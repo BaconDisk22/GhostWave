@@ -40,6 +40,20 @@ jobs:
           path: /tmp/vmesh.*
           if-no-files-found: warn
           retention-days: 7
+      - name: Client link end to end (3 daemons + reference client)
+        working-directory: firmware
+        run: |
+          export CLIENTLINK_PORT=$(( 46000 + GITHUB_RUN_ID % 1000 ))
+          # ~10-30 s locally; bounded so a stalled daemon cannot hang the job
+          timeout --signal=TERM --kill-after=10s 180s ./pi/tools/clientlink_e2e.sh build/ghostwaved
+      - name: Upload client-link diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: clientlink-ci-failure-${{ github.run_id }}
+          path: /tmp/clientlink.*
+          if-no-files-found: warn
+          retention-days: 7
 
   sim-smoke:
     name: Sim smoke test
