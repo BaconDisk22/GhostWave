@@ -266,6 +266,8 @@ struct TestApp : AppPort {
   std::vector<std::pair<uint32_t, uint16_t>> sosAcks;
   std::vector<std::pair<uint32_t, std::string>> idents;   // first-seen peers
   std::vector<std::pair<uint32_t, std::array<uint8_t, 32>>> keyChanges;
+  std::vector<std::pair<uint32_t, bool>> neighbors;   // (id, isNew) per beacon
+  void onNeighbor(uint32_t id, const Position&, bool isNew) override { neighbors.push_back({id, isNew}); }
   void onMessage(uint32_t src, uint32_t, const std::vector<uint8_t>& p) override { got.push_back({src, p}); }
   void onDelivered(uint32_t, uint32_t mid) override { delivered.push_back(mid); }
   void onSos(const SosInfo& s) override { sos.push_back(s); }
@@ -1085,6 +1087,19 @@ static void testIdentExchange() {
   CHECK(!a.router->hasPeerKey(idb) && !b.router->hasPeerKey(ida));
   m.run(20000);
   CHECK(a.router->hasPeerKey(idb) && b.router->hasPeerKey(ida));
+  // client-link hooks: beacons reach onNeighbor, learned keys show in peerList
+  CHECK(!a.app.neighbors.empty() && a.app.neighbors[0] == std::make_pair(idb, true));
+  {
+    auto pl = a.router->peerList();
+    uint8_t ebPub[32], xb[32];
+    ed25519Public(sb, ebPub);
+    ed25519ToX25519(ebPub, xb);
+    CHECK(pl.size() == 1 && pl[0].id == idb && pl[0].name == "bob" && !pl[0].pinned &&
+          std::memcmp(pl[0].xPub.data(), xb, 32) == 0);
+    CHECK(a.router->setPeerName(idb, "Bob B") && a.router->peerList()[0].name == "Bob B");
+    CHECK(!a.router->setPeerName(0x1234, "nobody"));
+    CHECK(a.router->setPeerName(idb, "bob"));
+  }
   CHECK(a.app.idents.size() == 1 && a.app.idents[0] == std::make_pair(idb, std::string("bob")));
   CHECK(b.app.idents.size() == 1 && b.app.idents[0] == std::make_pair(ida, std::string("alice")));
   uint32_t identFrames = m.count(PType::Ident);
