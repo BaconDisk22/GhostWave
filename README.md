@@ -49,14 +49,17 @@ DESIGN §14 before quoting these numbers.
 
 ```
 docs/DESIGN.md         protocol spec v0.1 (packet format, routing, DTN, budgets, SOS, security)
+docs/CLIENT_PROTOCOL.md  app <-> node link (framing, messages, offline queue); proto/ghostwave.proto
 sim/ghostsim.py        event-driven simulator: mobility, LoRa airtime, collisions, 3 protocols
 sim/results/           raw output of the benchmark runs
-firmware/core/         portable C++17 protocol core (packet codec + AEAD, router, SOS, NMEA, airtime)
+firmware/core/         portable C++17 protocol core (packet codec + AEAD, router, SOS, NMEA, airtime,
+                       client-link codec)
 firmware/tests/        host tests, including multi-node runs over a simulated radio
 firmware/third_party/  Monocypher 4.0.2 (vendored, pinned; BSD-2 / CC0)
 firmware/pi/           ghostwaved: Raspberry Pi daemon for the Backcountry Signal HAT (RadioLib),
                        plus a UDP virtual radio for testing without hardware
-firmware/pi/tools/     vmesh.sh: 4-daemon virtual mesh demo
+firmware/pi/tools/     vmesh.sh: 4-daemon virtual mesh demo; gwclient.py: reference app client;
+                       clientlink_e2e.sh: client-link end-to-end test; vmesh_lan.sh: mesh for app testing
 firmware/mcu/          PlatformIO firmware for ESP32-S3 Heltec boards (Wireless Tracker V2, V3)
 ```
 
@@ -111,6 +114,7 @@ cd firmware && cmake -S . -B build -DGHOSTWAVE_BUILD_VIRT=ON && cmake --build bu
 - **Options:** `--mcast 239.77.0.1:47700` sets the group. `--vif ADDR` picks the interface; use
   `--vif 127.0.0.1` when offline. `--vtx-dbm`, `--vgain` and `--vfade` change the link budget and
   fading. `--vlog` prints one line per frame heard, with distance and RSSI.
+- **Apps:** `--client-tcp [HOST:]PORT` opens the app link. See [Client link](#client-link-apps).
 - **Stats:** `stats` adds a `vradio` line showing frames heard, decoded, out of range, weak, collided,
   and dropped for no position.
 - **Pi builds:** a `-DGHOSTWAVE_BUILD_PI=ON` build has both backends. `--radio e22p` is the default
@@ -134,6 +138,60 @@ The script passes when D prints the decrypted DM and C and D both hold the SOS. 
 the air in clear. The SOS text is sent in clear by design. Runtime varies; delivery checks may take several minutes, and intermittent SOS delivery failures remain under investigation. A gets no `DELIVERED`, because D's receipt waits on the far side until someone walks back.
 Env vars: `VMESH_VLOG=1` logs every frame, `VMESH_KEEP=1` keeps the logs, and `VMESH_IF` and
 `VMESH_PORT` choose the network.
+
+## Client link (apps)
+
+`ghostwaved --client-tcp [HOST:]PORT` lets an app drive the node. The link is specified in
+[docs/CLIENT_PROTOCOL.md](docs/CLIENT_PROTOCOL.md): framed protobuf, schema in
+[proto/ghostwave.proto](proto/ghostwave.proto). It is off by default. A bare port listens on
+127.0.0.1 only. The stdin commands keep working alongside it.
+
+Connect a client to a virtual node:
+
+```bash
+cd firmware && cmake -S . -B build -DGHOSTWAVE_BUILD_VIRT=ON && cmake --build build
+./build/ghostwaved --radio udp --key /tmp/a.key --name A --lat 46.87 --lon -113.99 --client-tcp 4403
+# in another terminal:
+./pi/tools/gwclient.py 4403 info       # node ID and keys: what a QR contact card carries
+./pi/tools/gwclient.py 4403 listen     # print events (messages, receipts, SOS, neighbors)
+```
+
+`gwclient.py` is the reference client. It needs only the Python standard library. It also has
+`status`, `pos`, `contacts`, `add [ID] ED25519_HEX [NAME]`, `known ID LAT LON`, `send ID TEXT`
+(waits for the delivery receipt), `setpos LAT LON`, `sos TEXT`, `sosstop` and `sosack ID`.
+
+**End-to-end test:** `firmware/pi/tools/clientlink_e2e.sh` starts three virtual nodes, A, B and C,
+1.5 km apart, each with a client port. It drives them only through the link:
+
+- A's client DMs B's client and gets the `Delivered` receipt for its `client_msg_id`.
+- A DMs C while C has no client. The message is held, then replayed when C's client connects.
+- A's client raises an SOS. B's client sees it and acks it, and A's client sees the ack.
+- The error paths are checked too.
+
+It takes about 10 s, and CI runs it.
+
+**A mesh for app testing:** `firmware/pi/tools/vmesh_lan.sh` starts 2–6 nodes and leaves them
+running until Ctrl-C. Each node exposes its client port and fixed positions are used. The script
+prints a table of node IDs, ports and Ed25519 keys:
+
+```bash
+firmware/pi/tools/vmesh_lan.sh -n 5               # client ports 127.0.0.1:47800-47804
+firmware/pi/tools/vmesh_lan.sh -n 5 --lan         # bound to this machine's LAN address, for a phone
+firmware/pi/tools/vmesh_lan.sh --bind 0.0.0.0     # every interface
+```
+
+A phone cannot reach 127.0.0.1 on your computer, so phone testing needs `--lan`, or `--bind` with the
+computer's Wi-Fi address. Then connect the app to `<that address>:47800`. With `--lan`, local
+clients must use that address too, because the port is not also on loopback.
+
+The phone and computer must be on the same network, and the computer's firewall must allow
+incoming TCP on those ports. macOS asks the first time.
+
+**Safety:** the client link has **no authentication yet**. Anyone who can reach a bound port can
+read that node's DMs, send messages as it, pin keys, and raise or ack an SOS. Only bind to a LAN
+address on a network you trust, such as home Wi-Fi, never café or event Wi-Fi. Stop the mesh when
+done. These are virtual nodes with throwaway keys, but treat the habit as if they were real.
+`ghostwaved` prints a warning whenever its client port is not on loopback.
 
 ## Run on the Pi HAT
 

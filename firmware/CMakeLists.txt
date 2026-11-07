@@ -54,9 +54,9 @@ if(GHOSTWAVE_BUILD_TESTS)
 endif()
 
 if(GHOSTWAVE_BUILD_PI OR GHOSTWAVE_BUILD_VIRT)
-  add_executable(ghostwaved pi/main.cpp pi/radio_udp.cpp pi/vchannel.cpp)
+  add_executable(ghostwaved pi/main.cpp pi/client_link.cpp pi/radio_udp.cpp pi/vchannel.cpp)
   target_link_libraries(ghostwaved ghostwave_core)
-  set_source_files_properties(pi/main.cpp pi/radio_udp.cpp pi/vchannel.cpp
+  set_source_files_properties(pi/main.cpp pi/client_link.cpp pi/radio_udp.cpp pi/vchannel.cpp
     TARGET_DIRECTORY ghostwaved PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra")
 endif()
 
